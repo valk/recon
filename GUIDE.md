@@ -122,6 +122,64 @@ The server will automatically:
 
 ---
 
+## Integration Methods (3 Ways to Use Recon)
+
+Depending on your workflow, you can consume the `recon` MCP server and its tools in three distinct ways:
+
+### 1. Direct Web UI (No coding agent/IDE needed)
+You can run the benchmark or check the tools inside the official **MCP Inspector** web console.
+```bash
+npx -y @modelcontextprotocol/inspector uv run python src/recon/server.py
+```
+Open the URL printed in the terminal (usually `http://localhost:5173`) in your browser, select `run_comparative_benchmark` from the **Tools** list, fill in the arguments, and run the benchmark directly.
+
+### 2. Programmatically in a Python Script
+You can trigger benchmarks programmatically (e.g. for batch runs or custom scripts) without starting the MCP transport layer.
+
+Create `run_benchmark.py`:
+```python
+import os
+import sys
+
+# Optional: set API keys for actual LLM execution (runs in simulation otherwise)
+os.environ["OPENROUTER_API_KEY"] = "your-api-key"
+
+# Add package source to Python path
+sys.path.insert(0, "/absolute/path/to/recon/src")
+
+from recon.server import run_comparative_benchmark
+
+report = run_comparative_benchmark(
+    repo_path="/absolute/path/to/target-repo",
+    model_name="deepseek/deepseek-chat",
+    task_description="Add bounds checks to Calculator.add"
+)
+print(report)
+```
+Run with:
+```bash
+uv run python run_benchmark.py
+```
+
+### 3. Inside MCP-Compatible Coding Agents & IDEs
+Hook the server up to standard agent tools to allow coding models to use the elision, navigation, and mutation pipeline.
+
+* **Claude Code (Terminal Agent)**:
+  Register the server in Claude Code:
+  ```bash
+  claude mcp add uv --project /Users/valu/src/recon python -m recon.server
+  ```
+  Then query the agent:
+  > *"Run a comparative benchmark on `/path/to/target-repo` using deepseek/deepseek-chat for the task: 'Fix bounds error in subtract'."*
+
+* **Cursor IDE / Roo Code / Continue**:
+  Add an MCP server in settings:
+  - **Type**: `command`
+  - **Command**: `uv`
+  - **Args**: `["run", "--project", "/Users/valu/src/recon", "python", "-m", "recon.server"]`
+
+---
+
 ## Interactive Local Testing (Without an IDE)
 
 You can inspect and trigger tools manually using the Model Context Protocol Inspector:
