@@ -5,7 +5,7 @@ from recon.parser import get_parser
 
 class SemanticGraph:
     def __init__(self):
-        self.conn = sqlite3.connect(":memory:")
+        self.conn = sqlite3.connect(":memory:", check_same_thread=False)
         self.create_tables()
 
     def create_tables(self):
@@ -446,10 +446,11 @@ class SemanticGraph:
         if not rows:
             ref_content = "No references found."
         else:
+            fence = "```"
             ref_lines = []
             for file_path, line, context in rows:
                 ref_lines.append(f"- **[file://{file_path}#L{line}]({file_path}#L{line})**")
-                ref_lines.append(f"  ```python\n  {context}\n  ```")
+                ref_lines.append(f"  {fence}python\n  {context}\n  {fence}")
             ref_content = "\n".join(ref_lines)
             
         return "\n".join(def_lines) + "### References\n" + ref_content

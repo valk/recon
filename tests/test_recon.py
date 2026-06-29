@@ -18,7 +18,13 @@ from recon.server import (
 class TestReconServer(unittest.TestCase):
     def setUp(self):
         self.repo_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "dummy_repo"))
-        self.metrics_file = ".mcp_token_metrics.json"
+        # Resolve metrics file relative to the package root, matching middleware logic
+        package_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        self.metrics_file = os.path.join(package_root, ".mcp_token_metrics.json")
+        
+        # Ensure clean state by removing any existing metrics file at start
+        if os.path.exists(self.metrics_file):
+            os.remove(self.metrics_file)
         
         # Backup dummy repo files to restore after mutation tests
         self.backup_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "dummy_repo_backup"))
@@ -159,18 +165,30 @@ class TestReconServer(unittest.TestCase):
 
     def test_run_comparative_benchmark(self):
         print("\n--- Running Comparative Benchmark Test ---")
-        from recon.server import run_comparative_benchmark
-        report = run_comparative_benchmark(
-            self.repo_path,
-            "deepseek/deepseek-chat",
-            "Add logging metrics into Calculator.add method"
-        )
-        print("Comparative Benchmark Report:")
-        print(report)
-        self.assertIn("Comparative Evaluation Report: Recon vs. Baseline", report)
-        self.assertIn("With Recon (3-Tier)", report)
-        self.assertIn("Without Recon (Baseline)", report)
-        self.assertIn("Simulation Mode Active", report)
+        # Temporarily clear LLM API keys to force simulation mode during tests
+        old_keys = {}
+        for key in ["OPENROUTER_API_KEY", "OPENAI_API_KEY", "DEEPSEEK_API_KEY"]:
+            if key in os.environ:
+                old_keys[key] = os.environ[key]
+                del os.environ[key]
+                
+        try:
+            from recon.server import run_comparative_benchmark
+            report = run_comparative_benchmark(
+                repo_path=self.repo_path,
+                task_description="Add logging metrics into Calculator.add method",
+                model_name="deepseek/deepseek-chat"
+            )
+            print("Comparative Benchmark Report:")
+            print(report)
+            self.assertIn("Comparative Evaluation Report: Recon vs. Baseline", report)
+            self.assertIn("With Recon (3-Tier)", report)
+            self.assertIn("Without Recon (Baseline)", report)
+            self.assertIn("Simulation Mode Active", report)
+        finally:
+            # Restore original environment keys
+            for key, val in old_keys.items():
+                os.environ[key] = val
 
 if __name__ == "__main__":
     unittest.main()

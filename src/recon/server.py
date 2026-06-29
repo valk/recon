@@ -7,6 +7,27 @@ from recon.parser import elide_source
 from recon.graph import SemanticGraph
 from recon.mutator import hydrate_node_body as hydrate_body, mutate_node_body as mutate_body
 
+def load_env_file():
+    """Dynamically parses and loads environment variables from a local .env file if it exists."""
+    project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    env_path = os.path.join(project_root, ".env")
+    if os.path.exists(env_path):
+        try:
+            with open(env_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith("#") and "=" in line:
+                        key, val = line.split("=", 1)
+                        key = key.strip()
+                        val = val.strip().strip("'\"")
+                        if key:
+                            os.environ[key] = val
+        except Exception:
+            pass
+
+# Load environmental configs prior to server run
+load_env_file()
+
 # Initialize FastMCP Server
 mcp = FastMCP("recon")
 
@@ -119,7 +140,7 @@ def mutate_node_body(file_path: str, target_entity: str, new_body_code: str) -> 
 
 @mcp.tool()
 @log_token_metrics("run_comparative_benchmark")
-def run_comparative_benchmark(repo_path: str, model_name: str, task_description: str) -> str:
+def run_comparative_benchmark(repo_path: str, task_description: str, model_name: str = "") -> str:
     """
     Executes a comparative benchmark on a target repository for a given task.
     Runs the task under two conditions: With Recon (AST-guided node patching) and
@@ -134,6 +155,10 @@ def run_comparative_benchmark(repo_path: str, model_name: str, task_description:
     repo_path = os.path.abspath(repo_path)
     if not os.path.exists(repo_path):
         return f"Error: Repository path '{repo_path}' does not exist."
+
+    # Resolve model name from environment variables if not provided
+    if not model_name:
+        model_name = os.environ.get("RECON_MODEL") or os.environ.get("DEFAULT_MODEL") or "deepseek/deepseek-chat"
 
     # Parse and index target repository first
     semantic_graph.indexed_repo_path = repo_path
@@ -235,6 +260,17 @@ def run_comparative_benchmark(repo_path: str, model_name: str, task_description:
     # Determine if we are running in simulation
     is_simulation = not (os.environ.get("OPENROUTER_API_KEY") or os.environ.get("OPENAI_API_KEY") or os.environ.get("DEEPSEEK_API_KEY"))
 
+    def log_progress(msg: str):
+        print(msg, file=sys.stderr, flush=True)
+
+    log_progress(f"\n[*] Starting comparative benchmark using model: {model_name}")
+    log_progress(f"[*] Target repository: {repo_path}")
+    log_progress(f"[*] Task description: \"{task_description}\"")
+    if is_simulation:
+        log_progress("[*] Mode: SIMULATION (No API keys found. Emulating standard task profiles.)\n")
+    else:
+        log_progress("[*] Mode: LIVE API RUN\n")
+
     # Backup the codebase files to restore afterwards
     backup_files = {}
     for root, dirs, files in os.walk(repo_path):
@@ -249,6 +285,7 @@ def run_comparative_benchmark(repo_path: str, model_name: str, task_description:
                     pass
 
     # --- RUN WITH RECON ---
+    log_progress("[*] --- Stage 1: Running WITH RECON (3-Tier AST Guided) ---")
     recon_in_tokens = 0
     recon_out_tokens = 0
     recon_success = False
@@ -257,6 +294,7 @@ def run_comparative_benchmark(repo_path: str, model_name: str, task_description:
     recon_file = "N/A"
 
     if is_simulation:
+        log_progress("    [+] Running With-Recon simulated execution...")
         recon_in_tokens = 1500
         recon_out_tokens = 250
         recon_success = True
@@ -266,9 +304,11 @@ def run_comparative_benchmark(repo_path: str, model_name: str, task_description:
     else:
         try:
             # Step A: Generate repo blueprint
+            log_progress("    [+] Step A: Generating repository blueprint & parsing AST nodes...")
             blueprint = generate_repo_blueprint(repo_path)
             
             # Step B: Identify the target node to mutate
+            log_progress("    [+] Step B: Calling LLM to identify mutation target file & entity FQN...")
             messages = [
                 {"role": "system", "content": "You are a software engineering agent acting on a codebase. Based on the repo blueprint, identify which single Python file path and method/function FQN (e.g. 'Calculator.add' or 'my_standalone_func') should be modified. Task: " + task_description},
                 {"role": "user", "content": f"Repository Blueprint:\n{blueprint}\n\nSpecify the target in JSON. Return ONLY: {{\"file_path\": \"relative/path/to/file.py\", \"target_entity\": \"ClassName.method_name\"}}"}
@@ -282,8 +322,10 @@ def run_comparative_benchmark(repo_path: str, model_name: str, task_description:
             target_entity = target_info["target_entity"]
             recon_file = rel_file_path
             recon_mutated_entity = target_entity
+            log_progress(f"        -> Target identified: '{target_entity}' inside file '{rel_file_path}'")
             
             # Step C: Hydrate and mutate
+            log_progress(f"    [+] Step C: Hydrating target body and requesting AST node modification from LLM...")
             abs_file_path = os.path.join(repo_path, rel_file_path)
             body = hydrate_body(abs_file_path, target_entity)
             
@@ -296,24 +338,31 @@ def run_comparative_benchmark(repo_path: str, model_name: str, task_description:
             recon_out_tokens += out_t
             
             new_body = extract_code(response)
+            log_progress("    [+] Step D: Compiling, aligning indentation, and mutating file on disk...")
             mutation_res = mutate_body(abs_file_path, target_entity, new_body)
             
             if "successful" in mutation_res.lower():
+                log_progress("    [+] Step E: Running repository tests for With-Recon code...")
                 recon_success, test_log = run_repo_tests()
                 recon_log = test_log
+                log_progress(f"        -> Test suite run completed (Result: {'Passed' if recon_success else 'Failed'})")
             else:
                 recon_success = False
                 recon_log = f"AST Mutation Failed: {mutation_res}"
+                log_progress(f"        -> AST Mutation failed validation: {mutation_res}")
         except Exception as ex:
             recon_success = False
             recon_log = f"Recon comparative loop failed: {ex}"
+            log_progress(f"        -> Loop encountered error: {ex}")
 
     # Restore codebase from backup
+    log_progress("    [+] Restoring codebase back to clean backup state...")
     for p, content in backup_files.items():
         with open(p, "wb") as f:
             f.write(content)
 
     # --- RUN WITHOUT RECON (BASELINE) ---
+    log_progress("\n[*] --- Stage 2: Running WITHOUT RECON (Baseline Context Overwrite) ---")
     baseline_in_tokens = 0
     baseline_out_tokens = 0
     baseline_success = False
@@ -321,6 +370,7 @@ def run_comparative_benchmark(repo_path: str, model_name: str, task_description:
     baseline_file = "N/A"
 
     if is_simulation:
+        log_progress("    [+] Running Baseline simulated execution...")
         baseline_in_tokens = 12000
         baseline_out_tokens = 1500
         baseline_success = True
@@ -329,12 +379,14 @@ def run_comparative_benchmark(repo_path: str, model_name: str, task_description:
     else:
         try:
             # Read full codebase contents (simulating standard context feeding)
+            log_progress("    [+] Step A: Ingesting full repository source context into payload...")
             full_context = ""
             for p, content in backup_files.items():
                 rel_p = os.path.relpath(p, repo_path)
                 full_context += f"### File: {rel_p}\n```python\n{content.decode('utf8', errors='ignore')}\n```\n\n"
             
             # Step A: Request modification of full file
+            log_progress("    [+] Step B: Calling LLM to modify target source file within full context...")
             messages = [
                 {"role": "system", "content": "You are a software engineering agent acting on a codebase. You must modify the code to satisfy the task. Task: " + task_description},
                 {"role": "user", "content": f"Here is the full repository code:\n{full_context}\n\nImplement the changes. Specify which relative file path you modified, and return the ENTIRE updated content of that file inside a python code block."}
@@ -358,24 +410,32 @@ def run_comparative_benchmark(repo_path: str, model_name: str, task_description:
                 
             baseline_file = target_rel_path
             new_file_content = extract_code(response)
+            log_progress(f"        -> Target identified: full overwrite of '{target_rel_path}'")
             
             # Overwrite file
+            log_progress("    [+] Step C: Writing modified file content to disk...")
             abs_target_path = os.path.join(repo_path, target_rel_path)
             with open(abs_target_path, "w") as f:
                 f.write(new_file_content)
                 
             # Compile check and test execution
+            log_progress("    [+] Step D: Compiling changes and running repository test suite...")
             compile(new_file_content, abs_target_path, "exec")
             baseline_success, test_log = run_repo_tests()
             baseline_log = test_log
+            log_progress(f"        -> Test suite run completed (Result: {'Passed' if baseline_success else 'Failed'})")
         except Exception as ex:
             baseline_success = False
             baseline_log = f"Baseline comparative loop failed: {ex}"
+            log_progress(f"        -> Loop encountered error: {ex}")
 
     # Restore codebase back to original state
+    log_progress("    [+] Restoring codebase back to clean backup state...")
     for p, content in backup_files.items():
         with open(p, "wb") as f:
             f.write(content)
+
+    log_progress("\n[*] Benchmark execution complete. Formatting side-by-side metrics report...")
 
     # 3. Format Comparative Report
     report = [

@@ -98,15 +98,26 @@ To evaluate the exact token efficiency gains:
 Instead of manually running tasks twice, you can execute the entire evaluation flow automatically using the `run_comparative_benchmark` tool.
 
 ### 1. Configure LLM API Keys (Optional)
-To run actual completions against models like DeepSeek or Claude, set one of the following environment variables in your terminal before launching the server:
-```bash
-export OPENROUTER_API_KEY="your-openrouter-key"
-# OR
-export OPENAI_API_KEY="your-openai-key"
-# OR
-export DEEPSEEK_API_KEY="your-deepseek-key"
-```
-*Note: If no API keys are provided, the benchmark tool will automatically execute in a **Simulation Mode**, returning a mock report to verify directory configuration and test coverage.*
+To run actual completions against models like DeepSeek or Claude, you have two options:
+
+* **Option A (Recommended): Create a `.env` file**
+  Create a file named `.env` in the root of your `recon` project directory (`/Users/valu/src/recon/.env`) and add your token there:
+  ```env
+  OPENROUTER_API_KEY="your-openrouter-token-here"
+  # OR
+  OPENAI_API_KEY="your-openai-token-here"
+  # OR
+  DEEPSEEK_API_KEY="your-deepseek-token-here"
+  ```
+  The server will automatically parse and load this file at startup, eliminating the need to set them manually in the MCP Inspector or IDE configurations.
+
+* **Option B: Export in your terminal**
+  Export the key in your terminal before launching the server:
+  ```bash
+  export OPENROUTER_API_KEY="your-openrouter-key"
+  ```
+
+*Note: If no API keys are provided in either `.env` or the environment, the benchmark tool will automatically execute in a **Simulation Mode**, returning a mock report to verify directory configuration and test coverage.*
 
 ### 2. Invoke the Benchmark
 Ask the agent (or trigger the tool in the Inspector) to run the comparative pipeline:
