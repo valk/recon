@@ -585,7 +585,7 @@ def get_token_metrics_report() -> str:
 
 @mcp.tool()
 @log_token_metrics("run_claw_lite_benchmark")
-def run_claw_lite_benchmark(workspace_dir: str, limit: int = 80, model_name: str = "") -> str:
+def run_claw_lite_benchmark(workspace_dir: str, limit: int = 80, shuffle: bool = False, model_name: str = "") -> str:
     """
     Executes comparative benchmarks across the Claw-SWE-Bench Lite-80 subset.
     Measures average token savings, validates test result consistency, and compiles
@@ -606,10 +606,15 @@ def run_claw_lite_benchmark(workspace_dir: str, limit: int = 80, model_name: str
 
     if is_simulation:
         log_progress(f"\n[*] Starting simulated Claw-SWE-Bench Lite-80 evaluation (Limit: {limit} instances)...")
-        for i in range(limit):
-            instance_id = f"Claw-Lite-{i+1:02d}"
+        instance_ids = [f"Claw-Lite-{i+1:02d}" for i in range(80)]
+        if shuffle:
+            log_progress("[*] Shuffling simulated instances for random order...")
+            random.shuffle(instance_ids)
+        instance_ids = instance_ids[:limit]
+        
+        for idx, instance_id in enumerate(instance_ids):
             # Seed to generate deterministic mock benchmark values
-            random.seed(i)
+            random.seed(hash(instance_id))
             base_in = random.randint(11000, 16000)
             base_out = random.randint(800, 1200)
             
@@ -627,6 +632,7 @@ def run_claw_lite_benchmark(workspace_dir: str, limit: int = 80, model_name: str
                 "base_out": base_out,
                 "recon_pass": True,
                 "base_pass": True,
+                "runnable": True,
                 "error": None
             })
             log_progress(f"    [+] Evaluated {instance_id}: Recon total = {recon_in+recon_out:,} | Baseline total = {base_in+base_out:,}")
@@ -643,9 +649,15 @@ def run_claw_lite_benchmark(workspace_dir: str, limit: int = 80, model_name: str
             return f"Error loading Claw-SWE-Bench dataset: {e}"
 
         os.makedirs(workspace_dir, exist_ok=True)
+        
+        items = list(dataset)
+        if shuffle:
+            log_progress("[*] Shuffling dataset items for random order...")
+            random.shuffle(items)
+            
         count = 0
 
-        for item in dataset:
+        for item in items:
             if count >= limit:
                 break
                 

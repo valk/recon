@@ -217,6 +217,66 @@ class TestReconServer(unittest.TestCase):
             for key, val in old_keys.items():
                 os.environ[key] = val
 
+    def test_run_claw_lite_benchmark_shuffle(self):
+        print("\n--- Running Claw-SWE-Bench Shuffle Test ---")
+        import io
+        import contextlib
+        
+        # Ensure simulation mode is forced by temporarily clearing API keys
+        old_keys = {}
+        for key in ["OPENROUTER_API_KEY", "OPENAI_API_KEY", "DEEPSEEK_API_KEY"]:
+            if key in os.environ:
+                old_keys[key] = os.environ[key]
+                del os.environ[key]
+                
+        try:
+            from recon.server import run_claw_lite_benchmark
+            
+            # Run without shuffle
+            f_no_shuffle = io.StringIO()
+            with contextlib.redirect_stderr(f_no_shuffle):
+                run_claw_lite_benchmark(
+                    workspace_dir=self.repo_path,
+                    limit=20,
+                    shuffle=False,
+                    model_name="deepseek/deepseek-chat"
+                )
+            
+            # Run with shuffle
+            f_shuffle = io.StringIO()
+            with contextlib.redirect_stderr(f_shuffle):
+                run_claw_lite_benchmark(
+                    workspace_dir=self.repo_path,
+                    limit=20,
+                    shuffle=True,
+                    model_name="deepseek/deepseek-chat"
+                )
+                
+            # Parse instances from stderr
+            import re
+            order_no_shuffle = re.findall(r'Claw-Lite-\d+', f_no_shuffle.getvalue())
+            order_shuffle = re.findall(r'Claw-Lite-\d+', f_shuffle.getvalue())
+            
+            print("No shuffle order:", order_no_shuffle[:10])
+            print("Shuffle order   :", order_shuffle[:10])
+            
+            # Without shuffle, it should be in standard ascending order (Claw-Lite-01 to Claw-Lite-20)
+            expected_no_shuffle = [f"Claw-Lite-{i:02d}" for i in range(1, 21)]
+            self.assertEqual(order_no_shuffle, expected_no_shuffle)
+            
+            # With shuffle, the order/subset should be different
+            self.assertNotEqual(order_shuffle, expected_no_shuffle)
+            self.assertEqual(len(order_shuffle), 20)
+            
+            # All items should belong to the total set of 80 simulated instances
+            all_possible = {f"Claw-Lite-{i:02d}" for i in range(1, 81)}
+            self.assertTrue(set(order_shuffle).issubset(all_possible))
+            
+        finally:
+            # Restore original environment keys
+            for key, val in old_keys.items():
+                os.environ[key] = val
+
     def test_non_python_languages(self):
         print("\n--- Running Multi-Language Test ---")
         

@@ -33,6 +33,7 @@ def cmd_lite80(args):
     report = run_claw_lite_benchmark(
         workspace_dir=os.path.abspath(args.workspace_dir),
         limit=args.limit,
+        shuffle=args.shuffle,
         model_name=args.model
     )
     print("\n" + "=" * 60 + "\n")
@@ -78,6 +79,7 @@ def main():
     )
     p_lite.add_argument("workspace_dir", help="Directory to clone benchmark repos into")
     p_lite.add_argument("--limit", type=int, default=80, help="Number of instances to evaluate (default: 80)")
+    p_lite.add_argument("--shuffle", action="store_true", help="Shuffle dataset items to run in random order")
     p_lite.add_argument("--model", default="", help="LLM model name (e.g. deepseek/deepseek-chat). Falls back to RECON_MODEL env var.")
 
     args = parser.parse_args()
