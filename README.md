@@ -40,6 +40,11 @@ A safe, structure-aware mutation engine to apply edits directly to AST nodes.
 
 Recon regularly achieves **65% to 90% token savings** (on both input and output) compared to baseline file-reading agents. This efficiency matches the upper limits of state-of-the-art academic code context compression.
 
+### The Output Token Leverage (Speed & Cost Optimization)
+Output tokens are typically **3x to 4x more expensive** and significantly slower to generate than input tokens (due to the auto-regressive nature of LLMs).
+* **The Baseline Approach**: To apply an edit, standard agents are forced to write out the **entire updated contents of the modified file** to avoid search-and-replace alignment errors. For a 100-line file, this requires writing ~1,000 output tokens.
+* **The Recon Approach**: In Tier 3 (Mutation), Recon instructs the LLM to output **only the raw replacement code block for the body of the target function**. This reduces output tokens down to ~100-150 tokens (an **80% to 90% reduction**). The local server programmatically aligns the indentation, verifies python syntax validity, and patches the file on disk instantly.
+
 ### Recon vs. Existing Open Source
 * **Aider (RepoMap)**: While Aider uses tree-sitter to build a structural repository map for orientation (similar to Recon's Tier 1), it still reads the *entire contents* of files when applying edits. Recon goes a step further: it never exposes implementation details of unmodified blocks to the LLM during mutation (Tier 3), surgically patching function bodies in isolation.
 * **Prompt Compressors (e.g., LLMLingua)**: General compressors strip words based on information entropy (perplexity). These are code-blind and frequently break syntax, remove whitespace, or corrupt Python's indentation structure. Recon uses AST-grounded pruning, guaranteeing 100% syntactical safety.
