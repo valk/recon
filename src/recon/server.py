@@ -238,7 +238,13 @@ def run_comparative_benchmark(repo_path: str, task_description: str, model_name:
                 out_t = usage.get("completion_tokens", len(content) // 4)
                 return content, in_t, out_t
         except Exception as e:
-            raise RuntimeError(f"LLM API Call failed: {e}")
+            err_body = ""
+            if hasattr(e, "read"):
+                try:
+                    err_body = f" - Response: {e.read().decode('utf-8')}"
+                except Exception:
+                    pass
+            raise RuntimeError(f"LLM API Call failed: {e}{err_body}")
 
     # 2. Helper for executing tests in the target repository
     def run_repo_tests() -> tuple[bool, bool, str]:
