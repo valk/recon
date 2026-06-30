@@ -1,4 +1,5 @@
 import os
+import sys
 import sqlite3
 import tree_sitter
 from recon.parser import get_parser
@@ -78,7 +79,6 @@ class SemanticGraph:
     def register_file(self, file_path: str):
         cursor = self.conn.cursor()
         cursor.execute("INSERT OR REPLACE INTO files (path) VALUES (?)", (file_path,))
-        self.conn.commit()
 
     def register_symbol(self, fqn: str, name: str, symbol_type: str, file_path: str, start_line: int, end_line: int):
         cursor = self.conn.cursor()
@@ -86,7 +86,6 @@ class SemanticGraph:
         INSERT OR REPLACE INTO symbols (fqn, name, type, file_path, start_line, end_line)
         VALUES (?, ?, ?, ?, ?, ?)
         """, (fqn, name, symbol_type, file_path, start_line, end_line))
-        self.conn.commit()
 
     def register_import(self, file_path: str, local_name: str, target_fqn: str):
         cursor = self.conn.cursor()
@@ -94,7 +93,6 @@ class SemanticGraph:
         INSERT OR REPLACE INTO imports (file_path, local_name, target_fqn)
         VALUES (?, ?, ?)
         """, (file_path, local_name, target_fqn))
-        self.conn.commit()
 
     def register_call(self, caller_fqn: str, callee_fqn: str, file_path: str, line: int):
         cursor = self.conn.cursor()
@@ -102,15 +100,13 @@ class SemanticGraph:
         INSERT OR IGNORE INTO calls (caller_fqn, callee_fqn, file_path, line)
         VALUES (?, ?, ?, ?)
         """, (caller_fqn, callee_fqn, file_path, line))
-        self.conn.commit()
 
     def register_reference(self, symbol_name: str, file_path: str, line: int, context: str):
-        cursor = self.conn.cursor()
+        cursor = self.conn.conn.cursor() if hasattr(self.conn, 'conn') else self.conn.cursor()
         cursor.execute("""
         INSERT INTO references_table (symbol_name, file_path, line, context)
         VALUES (?, ?, ?, ?)
         """, (symbol_name, file_path, line, context))
-        self.conn.commit()
 
     def is_test_file(self, file_path: str) -> bool:
         """Determines if a file is a test file to exclude from indexing."""
@@ -144,7 +140,7 @@ class SemanticGraph:
         supported_files = []
         supported_exts = (".py", ".rs", ".go", ".js", ".ts", ".java", ".cpp", ".c", ".h", ".hpp", ".php", ".rb")
         for root, dirs, files in os.walk(repo_path):
-            dirs[:] = [d for d in dirs if not d.startswith(".")]
+            dirs[:] = [d for d in dirs if not d.startswith(".") and d.lower() not in ("node_modules", "build", "dist", "vendor", "venv", ".venv", "target", "website", "docs", "__pycache__", "wheels", "examples") and not d.endswith(".egg-info")]
             for file in files:
                 ext = os.path.splitext(file)[1].lower()
                 if ext in supported_exts:
@@ -157,9 +153,15 @@ class SemanticGraph:
                 break
 
         parser = get_parser()
+        
+        num_files = len(supported_files)
+        print(f"[*] Found {num_files} files to index. Starting parsing phase...", file=sys.stderr, flush=True)
 
         # Phase 1: Register files, symbols, and imports
-        for file_path in supported_files:
+        for idx, file_path in enumerate(supported_files):
+            if (idx + 1) % 50 == 0 or (idx + 1) == num_files:
+                print(f"    [+] Parsing file {idx + 1}/{num_files}: {os.path.relpath(file_path, repo_path)}", file=sys.stderr, flush=True)
+                
             self.register_file(file_path)
             module_fqn = self.get_module_fqn(repo_path, file_path)
 
@@ -191,7 +193,11 @@ class SemanticGraph:
         }
 
         # Phase 2: Resolve function calls and record references
-        for file_path in supported_files:
+        print(f"[*] Starting symbol resolution phase...", file=sys.stderr, flush=True)
+        for idx, file_path in enumerate(supported_files):
+            if (idx + 1) % 50 == 0 or (idx + 1) == num_files:
+                print(f"    [+] Resolving references for file {idx + 1}/{num_files}: {os.path.relpath(file_path, repo_path)}", file=sys.stderr, flush=True)
+                
             module_fqn = self.get_module_fqn(repo_path, file_path)
             try:
                 with open(file_path, "rb") as f:
@@ -211,6 +217,8 @@ class SemanticGraph:
                     file_path, module_fqn, content,
                     workspace_symbol_names, symbol_map
                 )
+        print(f"[*] Repository indexing complete.", file=sys.stderr, flush=True)
+        self.conn.commit()
 
     def _extract_non_python_symbols(self, file_path: str, module_fqn: str, content: bytes):
         import re

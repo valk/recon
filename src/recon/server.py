@@ -299,11 +299,12 @@ def run_comparative_benchmark(repo_path: str, task_description: str, model_name:
                 cwd=repo_path,
                 capture_output=True,
                 text=True,
-                timeout=45
+                timeout=120,
+                start_new_session=True
             )
             return True, res.returncode == 0, res.stdout + "\n" + res.stderr
         except subprocess.TimeoutExpired as te:
-            return True, False, f"Test suite timed out after 45 seconds.\nOutput so far:\n{te.stdout or ''}\n{te.stderr or ''}"
+            return True, False, f"Test suite timed out after 120 seconds.\nOutput so far:\n{te.stdout or ''}\n{te.stderr or ''}"
         except Exception as e:
             return False, False, f"Error executing test runner '{cmd}': {e}"
 
@@ -349,7 +350,7 @@ def run_comparative_benchmark(repo_path: str, task_description: str, model_name:
     supported_exts = (".py", ".rs", ".go", ".js", ".ts", ".java", ".cpp", ".c", ".h", ".hpp", ".php", ".rb")
     backup_files = {}
     for root, dirs, files in os.walk(repo_path):
-        dirs[:] = [d for d in dirs if not d.startswith(".")]
+        dirs[:] = [d for d in dirs if not d.startswith(".") and d.lower() not in ("node_modules", "build", "dist", "vendor", "venv", ".venv", "target", "website", "docs", "__pycache__", "wheels", "examples") and not d.endswith(".egg-info")]
         for file in files:
             ext = os.path.splitext(file)[1].lower()
             if ext in supported_exts and not semantic_graph.is_test_file(os.path.join(root, file)):
@@ -639,7 +640,9 @@ def bootstrap_results_from_log(logs_dir: str) -> tuple[list[dict], bool]:
     stage1_re = re.compile(r"\[\*\] --- Stage 1: Running WITH RECON")
     stage2_re = re.compile(r"\[\*\] --- Stage 2: Running WITHOUT RECON")
     test_re = re.compile(r"-> Test suite run completed \(Result:\s*(.*?)\)")
-    success_re = re.compile(r"\[\+\] Successfully benchmarked task\s*(\S+)")
+    success_re = re.compile(
+        r"\[\+\] Successfully benchmarked task\s*(\S+)(?:\s*\|\s*Recon tokens:\s*in=(\d+),\s*out=(\d+)\s*\|\s*Baseline tokens:\s*in=(\d+),\s*out=(\d+))?"
+    )
     failed_re = re.compile(r"\[!\] Benchmark execution failed:\s*(.*)")
     loop_err_re = re.compile(r"-> Loop encountered error:\s*(.*)")
 
@@ -703,13 +706,18 @@ def bootstrap_results_from_log(logs_dir: str) -> tuple[list[dict], bool]:
                 recon_runnable = (stage1_status != "Unrunnable" and not (stage1_status and stage1_status.startswith("Error:")))
                 base_runnable = (stage2_status != "Unrunnable" and not (stage2_status and stage2_status.startswith("Error:")))
                 
+                recon_in = int(success_match.group(2)) if success_match.group(2) else 0
+                recon_out = int(success_match.group(3)) if success_match.group(3) else 0
+                base_in = int(success_match.group(4)) if success_match.group(4) else 0
+                base_out = int(success_match.group(5)) if success_match.group(5) else 0
+                
                 results.append({
                     "instance_id": current_task,
                     "success": True,
-                    "recon_in": 0,
-                    "recon_out": 0,
-                    "base_in": 0,
-                    "base_out": 0,
+                    "recon_in": recon_in,
+                    "recon_out": recon_out,
+                    "base_in": base_in,
+                    "base_out": base_out,
                     "recon_pass": recon_pass,
                     "base_pass": base_pass,
                     "runnable": recon_runnable and base_runnable,
@@ -952,7 +960,7 @@ def run_claw_lite_benchmark(workspace_dir: str, limit: int = 80, shuffle: bool =
                     "runnable": recon_runnable and base_runnable,
                     "error": None
                 })
-                log_progress(f"    [+] Successfully benchmarked task {instance_id}")
+                log_progress(f"    [+] Successfully benchmarked task {instance_id} | Recon tokens: in={recon_in}, out={recon_out} | Baseline tokens: in={base_in}, out={base_out}")
             except Exception as benchmark_err:
                 log_progress(f"    [!] Benchmark execution failed: {benchmark_err}")
                 results.append({
