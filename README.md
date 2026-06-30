@@ -114,6 +114,9 @@ Indents `new_body_code` to match the target method, checks python syntax validit
 ### `run_comparative_benchmark(repo_path: str, model_name: str, task_description: str) -> str`
 Runs a comparative execution loop for a task—split into With Recon (using elided skeletons & AST mutations) and Without Recon (reading full files and editing them). Runs target repository tests, tracks exact LLM token counts, and formats a side-by-side comparison report. Automatically runs in simulated mode if no API keys are present.
 
+### `run_claw_lite_benchmark(workspace_dir: str, limit: int = 80, model_name: str = "") -> str`
+Runs the comparative benchmark suite against the Claw-SWE-Bench `Lite-80` subset. In Live Mode, it loads instances dynamically from Hugging Face, clones/checks out their repositories under `workspace_dir`, evaluates each instance sequentially, and returns an aggregated summary of token savings and result consistency verification. Runs in simulation mode if no LLM API keys are detected.
+
 ---
 
 ## Running the Server

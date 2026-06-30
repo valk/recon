@@ -133,6 +133,31 @@ The server will automatically:
 
 ---
 
+## Batch Evaluation: Claw-SWE-Bench Lite-80
+
+To evaluate the overall efficacy of Recon across a wider set of standard coding tasks, you can run a batch evaluation against the **Lite-80** group—an optimized 80-instance multilingual subset curated by the Claw-SWE-Bench project (hosted on Hugging Face at `TokenRhythm/Claw-SWE-Bench`).
+
+### 1. Prerequisites (For Live Run)
+To download the dataset and execute the real Git operations:
+* Install the Hugging Face `datasets` package:
+  ```bash
+  uv add datasets
+  ```
+
+### 2. Invoke the Batch Benchmark
+Ask the agent (or trigger the `run_claw_lite_benchmark` tool in the Inspector):
+> "Run the Claw-SWE-Bench Lite-80 benchmark. Store clone workspaces in `/absolute/path/to/workspaces` and limit evaluation to 10 instances."
+
+The server will automatically:
+1. Load the benchmark dataset from Hugging Face.
+2. Clone each target repository and check out its specified `base_commit` under your workspaces folder.
+3. Run the comparative benchmark for the task's issue description.
+4. Parse the results and output an aggregated markdown summary detailing:
+   - Average input, output, and total tokens saved (and savings %).
+   - Results consistency validation (verifying Recon achieved identical test outcomes/parity compared to the baseline).
+
+---
+
 ## Integration Methods (3 Ways to Use Recon)
 
 Depending on your workflow, you can consume the `recon` MCP server and its tools in three distinct ways:

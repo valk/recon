@@ -190,5 +190,32 @@ class TestReconServer(unittest.TestCase):
             for key, val in old_keys.items():
                 os.environ[key] = val
 
+    def test_run_claw_lite_benchmark(self):
+        print("\n--- Running Claw-SWE-Bench Lite-80 Test ---")
+        # Ensure simulation mode is forced by temporarily clearing API keys
+        old_keys = {}
+        for key in ["OPENROUTER_API_KEY", "OPENAI_API_KEY", "DEEPSEEK_API_KEY"]:
+            if key in os.environ:
+                old_keys[key] = os.environ[key]
+                del os.environ[key]
+                
+        try:
+            from recon.server import run_claw_lite_benchmark
+            report = run_claw_lite_benchmark(
+                workspace_dir=self.repo_path,
+                limit=5,
+                model_name="deepseek/deepseek-chat"
+            )
+            print("Claw Lite Benchmark Report (Simulation):")
+            print(report)
+            self.assertIn("Claw-SWE-Bench Lite-80 Benchmark Summary", report)
+            self.assertIn("Average Token Metrics", report)
+            self.assertIn("Results Functional Consistency Validation", report)
+            self.assertIn("Simulation Mode Active", report)
+        finally:
+            # Restore original environment keys
+            for key, val in old_keys.items():
+                os.environ[key] = val
+
 if __name__ == "__main__":
     unittest.main()
