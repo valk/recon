@@ -34,7 +34,8 @@ def cmd_lite80(args):
         workspace_dir=os.path.abspath(args.workspace_dir),
         limit=args.limit,
         shuffle=args.shuffle,
-        model_name=args.model
+        model_name=args.model,
+        resume=args.resume
     )
     print("\n" + "=" * 60 + "\n")
     print(report)
@@ -81,6 +82,7 @@ def main():
     p_lite.add_argument("--limit", type=int, default=80, help="Number of instances to evaluate (default: 80)")
     p_lite.add_argument("--shuffle", action="store_true", help="Shuffle dataset items to run in random order")
     p_lite.add_argument("--model", default="", help="LLM model name (e.g. deepseek/deepseek-chat). Falls back to RECON_MODEL env var.")
+    p_lite.add_argument("--resume", action="store_true", help="Resume benchmark execution from checkpoint or latest log file.")
 
     args = parser.parse_args()
 

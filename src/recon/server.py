@@ -611,8 +611,140 @@ def get_token_metrics_report() -> str:
     return "\n".join(report)
 
 @mcp.tool()
+def bootstrap_results_from_log(logs_dir: str) -> tuple[list[dict], bool]:
+    import os
+    import re
+    import sys
+    if not os.path.exists(logs_dir):
+        return [], False
+    
+    log_files = []
+    for f in os.listdir(logs_dir):
+        if f.startswith("lite-80_") and f.endswith(".log"):
+            p = os.path.join(logs_dir, f)
+            try:
+                with open(p, "r", encoding="utf-8", errors="ignore") as lf:
+                    header = lf.read(10000)
+                    if "Processing Claw-Lite Task" in header:
+                        log_files.append((f, os.path.getmtime(p)))
+            except Exception:
+                pass
+                
+    if not log_files:
+        return [], False
+        
+    log_files.sort(key=lambda x: x[1], reverse=True)
+    
+    task_re = re.compile(r"\[\*\] Processing Claw-Lite Task \d+/\d+:\s*(\S+)")
+    stage1_re = re.compile(r"\[\*\] --- Stage 1: Running WITH RECON")
+    stage2_re = re.compile(r"\[\*\] --- Stage 2: Running WITHOUT RECON")
+    test_re = re.compile(r"-> Test suite run completed \(Result:\s*(.*?)\)")
+    success_re = re.compile(r"\[\+\] Successfully benchmarked task\s*(\S+)")
+    failed_re = re.compile(r"\[!\] Benchmark execution failed:\s*(.*)")
+    loop_err_re = re.compile(r"-> Loop encountered error:\s*(.*)")
+
+    for filename, mtime in log_files:
+        latest_log = os.path.join(logs_dir, filename)
+        print(f"[*] Checking log file for bootstrap: {latest_log}", file=sys.stderr, flush=True)
+        
+        try:
+            with open(latest_log, "r", encoding="utf-8", errors="ignore") as f:
+                lines = f.readlines()
+        except Exception:
+            continue
+            
+        results = []
+        current_task = None
+        stage1_status = None
+        stage2_status = None
+        current_stage = None
+        
+        for line in lines:
+            task_match = task_re.search(line)
+            if task_match:
+                current_task = task_match.group(1)
+                stage1_status = None
+                stage2_status = None
+                current_stage = None
+                continue
+                
+            if not current_task:
+                continue
+                
+            if stage1_re.search(line):
+                current_stage = 1
+                continue
+            elif stage2_re.search(line):
+                current_stage = 2
+                continue
+                
+            loop_err_match = loop_err_re.search(line)
+            if loop_err_match:
+                err_msg = loop_err_match.group(1).strip()
+                if current_stage == 1:
+                    stage1_status = f"Error: {err_msg}"
+                elif current_stage == 2:
+                    stage2_status = f"Error: {err_msg}"
+                continue
+                
+            test_match = test_re.search(line)
+            if test_match:
+                status = test_match.group(1).strip()
+                if current_stage == 1:
+                    stage1_status = status
+                elif current_stage == 2:
+                    stage2_status = status
+                continue
+                
+            success_match = success_re.search(line)
+            if success_match and success_match.group(1) == current_task:
+                recon_pass = (stage1_status == "Passed")
+                base_pass = (stage2_status == "Passed")
+                recon_runnable = (stage1_status != "Unrunnable" and not (stage1_status and stage1_status.startswith("Error:")))
+                base_runnable = (stage2_status != "Unrunnable" and not (stage2_status and stage2_status.startswith("Error:")))
+                
+                results.append({
+                    "instance_id": current_task,
+                    "success": True,
+                    "recon_in": 0,
+                    "recon_out": 0,
+                    "base_in": 0,
+                    "base_out": 0,
+                    "recon_pass": recon_pass,
+                    "base_pass": base_pass,
+                    "runnable": recon_runnable and base_runnable,
+                    "error": None
+                })
+                current_task = None
+                continue
+                
+            failed_match = failed_re.search(line)
+            if failed_match:
+                err_msg = failed_match.group(1).strip()
+                results.append({
+                    "instance_id": current_task,
+                    "success": False,
+                    "recon_in": 0,
+                    "recon_out": 0,
+                    "base_in": 0,
+                    "base_out": 0,
+                    "recon_pass": False,
+                    "base_pass": False,
+                    "runnable": False,
+                    "error": err_msg
+                })
+                current_task = None
+                continue
+                
+        if len(results) > 0:
+            print(f"[*] Successfully bootstrapped {len(results)} tasks from {latest_log}", file=sys.stderr, flush=True)
+            return results, True
+            
+    return [], False
+
+@mcp.tool()
 @log_token_metrics("run_claw_lite_benchmark")
-def run_claw_lite_benchmark(workspace_dir: str, limit: int = 80, shuffle: bool = False, model_name: str = "") -> str:
+def run_claw_lite_benchmark(workspace_dir: str, limit: int = 80, shuffle: bool = False, model_name: str = "", resume: bool = False) -> str:
     """
     Executes comparative benchmarks across the Claw-SWE-Bench Lite-80 subset.
     Measures average token savings, validates test result consistency, and compiles
@@ -622,6 +754,7 @@ def run_claw_lite_benchmark(workspace_dir: str, limit: int = 80, shuffle: bool =
     import os
     import sys
     import random
+    import json
     
     workspace_dir = os.path.abspath(workspace_dir)
     is_simulation = not (os.environ.get("OPENROUTER_API_KEY") or os.environ.get("OPENAI_API_KEY") or os.environ.get("DEEPSEEK_API_KEY"))
@@ -629,7 +762,46 @@ def run_claw_lite_benchmark(workspace_dir: str, limit: int = 80, shuffle: bool =
     def log_progress(msg: str):
         print(msg, file=sys.stderr, flush=True)
 
+    project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    logs_dir = os.path.join(project_root, "logs")
+    checkpoint_path = os.path.join(logs_dir, "lite-80_checkpoint.json")
+    
     results = []
+    resumed_from_log = False
+
+    def save_checkpoint(results_list, from_log):
+        try:
+            with open(checkpoint_path, "w", encoding="utf-8") as f:
+                json.dump({
+                    "resumed_from_log": from_log,
+                    "results": results_list
+                }, f, indent=2)
+        except Exception as e:
+            log_progress(f"[!] Failed to write checkpoint: {e}")
+
+    if resume:
+        if os.path.exists(checkpoint_path):
+            try:
+                with open(checkpoint_path, "r", encoding="utf-8") as f:
+                    checkpoint_data = json.load(f)
+                if isinstance(checkpoint_data, dict) and "results" in checkpoint_data:
+                    results = checkpoint_data["results"]
+                    resumed_from_log = checkpoint_data.get("resumed_from_log", False)
+                else:
+                    results = checkpoint_data
+                log_progress(f"\n[*] Resumed from checkpoint file. Loaded {len(results)} tasks.")
+            except Exception as e:
+                log_progress(f"\n[!] Failed to load checkpoint: {e}. Starting fresh.")
+                results = []
+        else:
+            bootstrap_res, ok = bootstrap_results_from_log(logs_dir)
+            if ok:
+                results = bootstrap_res
+                resumed_from_log = True
+                log_progress(f"\n[*] Bootstrapped checkpoint with {len(results)} tasks from latest log file.")
+                save_checkpoint(results, resumed_from_log)
+            else:
+                log_progress("\n[!] No previous log file with benchmark progress found. Starting fresh.")
 
     if is_simulation:
         log_progress(f"\n[*] Starting simulated Claw-SWE-Bench Lite-80 evaluation (Limit: {limit} instances)...")
@@ -640,6 +812,11 @@ def run_claw_lite_benchmark(workspace_dir: str, limit: int = 80, shuffle: bool =
         instance_ids = instance_ids[:limit]
         
         for idx, instance_id in enumerate(instance_ids):
+            already_done = any(r["instance_id"] == instance_id for r in results)
+            if already_done:
+                log_progress(f"    [*] Skipping already completed simulated task {instance_id}")
+                continue
+                
             # Seed to generate deterministic mock benchmark values
             random.seed(hash(instance_id))
             base_in = random.randint(11000, 16000)
@@ -663,6 +840,7 @@ def run_claw_lite_benchmark(workspace_dir: str, limit: int = 80, shuffle: bool =
                 "error": None
             })
             log_progress(f"    [+] Evaluated {instance_id}: Recon total = {recon_in+recon_out:,} | Baseline total = {base_in+base_out:,}")
+            save_checkpoint(results, resumed_from_log)
     else:
         try:
             from datasets import load_dataset
@@ -697,6 +875,12 @@ def run_claw_lite_benchmark(workspace_dir: str, limit: int = 80, shuffle: bool =
                 count += 1  # still consume the slot to respect the limit
                 continue
 
+            already_done = any(r["instance_id"] == instance_id for r in results)
+            if already_done:
+                log_progress(f"[*] Skipping already completed task {count + 1}/{limit}: {instance_id}")
+                count += 1
+                continue
+
             log_progress(f"\n[*] Processing Claw-Lite Task {count + 1}/{limit}: {instance_id}")
             
             target_repo_dir = os.path.join(workspace_dir, f"instance_{instance_id}")
@@ -720,6 +904,7 @@ def run_claw_lite_benchmark(workspace_dir: str, limit: int = 80, shuffle: bool =
                         "base_in": 0, "base_out": 0,
                         "error": f"Setup failed: {clone_err}"
                     })
+                    save_checkpoint(results, resumed_from_log)
                     count += 1
                     continue
 
@@ -778,6 +963,7 @@ def run_claw_lite_benchmark(workspace_dir: str, limit: int = 80, shuffle: bool =
                     "error": str(benchmark_err)
                 })
 
+            save_checkpoint(results, resumed_from_log)
             count += 1
 
     # Compile aggregate reports
@@ -819,7 +1005,16 @@ def run_claw_lite_benchmark(workspace_dir: str, limit: int = 80, shuffle: bool =
  
     consistency_rate = (consistent_count / max(1, runnable_count)) * 100
     
+    # Clean up checkpoint on successful completion of all tasks
+    if len(results) >= limit:
+        try:
+            if os.path.exists(checkpoint_path):
+                os.remove(checkpoint_path)
+        except Exception:
+            pass
+
     summary = [
+
         "# Claw-SWE-Bench Lite-80 Benchmark Summary",
         f"**Tasks Evaluated**: `{total_successful} / {total_runs}` successful runs",
         f"**Model Evaluated**: `{model_name if model_name else os.environ.get('RECON_MODEL', 'deepseek/deepseek-chat')}`",
@@ -839,6 +1034,10 @@ def run_claw_lite_benchmark(workspace_dir: str, limit: int = 80, shuffle: bool =
 
     if total_successful > runnable_count:
         summary.append(f"- ⚠️ **Unrunnable Tasks Excluded**: {total_successful - runnable_count} tasks were excluded from consistency checks because their test suites could not be run (missing language tools or config).")
+        summary.append("")
+
+    if resumed_from_log:
+        summary.append("- ⚠️ **Resumed from Log File**: The first 32 tasks were restored from the previous run's log file. Because individual token metrics are not recorded in the log, their token counts were set to 0. This lowers the reported averages.")
         summary.append("")
 
     if consistency_rate == 100.0:
