@@ -6,5 +6,9 @@ dist/
 wheels/
 *.egg-info
 
+.mcp_token_metrics.json
+
 # Virtual environments
 .venv
+workspaces/
+logs/
