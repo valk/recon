@@ -217,5 +217,108 @@ class TestReconServer(unittest.TestCase):
             for key, val in old_keys.items():
                 os.environ[key] = val
 
+    def test_non_python_languages(self):
+        print("\n--- Running Multi-Language Test ---")
+        
+        # Test Elision
+        rust_code = b"""struct MyStruct {
+    value: i32,
+}
+
+impl MyStruct {
+    fn calculate(&self, factor: i32) -> i32 {
+        let res = self.value * factor;
+        res
+    }
+}"""
+        
+        from recon.parser import elide_source
+        elided_rust = elide_source(rust_code, "test.rs")
+        print("Elided Rust:")
+        print(elided_rust.decode('utf-8'))
+        self.assertIn(b"fn calculate(&self, factor: i32) -> i32 {...}", elided_rust)
+        
+        ruby_code = b"""class MyClass
+  def hello(name)
+    puts "Hello #{name}"
+  end
+end"""
+        elided_ruby = elide_source(ruby_code, "test.rb")
+        print("Elided Ruby:")
+        print(elided_ruby.decode('utf-8'))
+        self.assertIn(b"def hello(name) ...", elided_ruby)
+
+        # Write dummy files to test hydration/mutation
+        dummy_rust_path = os.path.join(self.repo_path, "dummy_rust.rs")
+        dummy_ruby_path = os.path.join(self.repo_path, "dummy_ruby.rb")
+        
+        try:
+            with open(dummy_rust_path, "wb") as f:
+                f.write(rust_code)
+            with open(dummy_ruby_path, "wb") as f:
+                f.write(ruby_code)
+                
+            # Test Hydration
+            from recon.mutator import hydrate_node_body, mutate_node_body
+            rust_body = hydrate_node_body(dummy_rust_path, "MyStruct.calculate")
+            print("Hydrated Rust body:")
+            print(repr(rust_body))
+            self.assertIn("let res = self.value * factor;", rust_body)
+            
+            ruby_body = hydrate_node_body(dummy_ruby_path, "MyClass.hello")
+            print("Hydrated Ruby body:")
+            print(repr(ruby_body))
+            self.assertIn("puts \"Hello #{name}\"", ruby_body)
+            
+            # Test Mutation
+            new_rust_body = """
+            let res = self.value * factor + 10;
+            res
+            """
+            mut_res_rust = mutate_node_body(dummy_rust_path, "MyStruct.calculate", new_rust_body)
+            print("Rust Mutation result:", mut_res_rust)
+            self.assertIn("successful", mut_res_rust.lower())
+            
+            with open(dummy_rust_path, "r") as f:
+                updated_rust = f.read()
+            print("Updated Rust:")
+            print(updated_rust)
+            self.assertIn("let res = self.value * factor + 10;", updated_rust)
+            
+            new_ruby_body = """
+            puts "Hello, hello #{name}!"
+            """
+            mut_res_ruby = mutate_node_body(dummy_ruby_path, "MyClass.hello", new_ruby_body)
+            print("Ruby Mutation result:", mut_res_ruby)
+            self.assertIn("successful", mut_res_ruby.lower())
+            
+            with open(dummy_ruby_path, "r") as f:
+                updated_ruby = f.read()
+            print("Updated Ruby:")
+            print(updated_ruby)
+            self.assertIn("puts \"Hello, hello #{name}!\"", updated_ruby)
+            
+            # Test Indexing
+            from recon.graph import SemanticGraph
+            sg = SemanticGraph()
+            sg.index_repository(self.repo_path)
+            
+            cursor = sg.conn.cursor()
+            cursor.execute("SELECT fqn, type FROM symbols WHERE file_path IN (?, ?)", (dummy_rust_path, dummy_ruby_path))
+            symbols = cursor.fetchall()
+            print("Indexed non-python symbols:")
+            print(symbols)
+            symbols_dict = dict(symbols)
+            self.assertIn("dummy_rust.MyStruct", symbols_dict)
+            self.assertIn("dummy_rust.MyStruct.calculate", symbols_dict)
+            self.assertIn("dummy_ruby.MyClass", symbols_dict)
+            self.assertIn("dummy_ruby.MyClass.hello", symbols_dict)
+            
+        finally:
+            if os.path.exists(dummy_rust_path):
+                os.remove(dummy_rust_path)
+            if os.path.exists(dummy_ruby_path):
+                os.remove(dummy_ruby_path)
+
 if __name__ == "__main__":
     unittest.main()

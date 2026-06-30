@@ -214,32 +214,71 @@ def run_comparative_benchmark(repo_path: str, task_description: str, model_name:
             raise RuntimeError(f"LLM API Call failed: {e}")
 
     # 2. Helper for executing tests in the target repository
-    def run_repo_tests() -> tuple[bool, str]:
-        # Try running pytest
-        try:
-            res = subprocess.run(
-                [".venv/bin/pytest"],
-                cwd=repo_path,
-                capture_output=True,
-                text=True,
-                timeout=30
-            )
-            return res.returncode == 0, res.stdout + "\n" + res.stderr
-        except Exception:
-            pass
+    def run_repo_tests() -> tuple[bool, bool, str]:
+        files_in_root = os.listdir(repo_path)
+        cmd = None
+        
+        if "Cargo.toml" in files_in_root:
+            cmd = ["cargo", "test"]
+        elif "go.mod" in files_in_root:
+            cmd = ["go", "test", "./..."]
+        elif "package.json" in files_in_root:
+            if "yarn.lock" in files_in_root:
+                cmd = ["yarn", "test"]
+            else:
+                cmd = ["npm", "test"]
+        elif "composer.json" in files_in_root or "phpunit.xml" in files_in_root:
+            if os.path.exists(os.path.join(repo_path, "vendor/bin/phpunit")):
+                cmd = [os.path.join(repo_path, "vendor/bin/phpunit")]
+            else:
+                cmd = ["phpunit"]
+        elif "Gemfile" in files_in_root or "Rakefile" in files_in_root or "spec" in files_in_root:
+            if "Gemfile" in files_in_root:
+                cmd = ["bundle", "exec", "rspec"]
+            else:
+                cmd = ["rspec"]
+        elif "pom.xml" in files_in_root:
+            cmd = ["mvn", "test"]
+        elif "build.gradle" in files_in_root or "build.gradle.kts" in files_in_root:
+            if "gradlew" in files_in_root:
+                cmd = ["./gradlew", "test"]
+            else:
+                cmd = ["gradle", "test"]
+        else:
+            venv_pytest = os.path.join(repo_path, ".venv/bin/pytest")
+            if os.path.exists(venv_pytest):
+                cmd = [venv_pytest]
+            else:
+                import shutil
+                if shutil.which("pytest"):
+                    cmd = ["pytest"]
+                else:
+                    venv_python = os.path.join(repo_path, ".venv/bin/python")
+                    if os.path.exists(venv_python):
+                        cmd = [venv_python, "-m", "unittest", "discover", "-s", "tests"]
+                    else:
+                        cmd = [sys.executable, "-m", "unittest", "discover", "-s", "tests"]
+                        
+        if not cmd:
+            return False, False, "No recognized test runner found for this repository."
             
-        # Try discovery via unittest
+        import shutil
+        if not shutil.which(cmd[0]) and not (cmd[0].startswith("./") or os.path.isabs(cmd[0])):
+            return False, False, f"Test runner command '{cmd[0]}' is not installed or not on PATH."
+            
         try:
             res = subprocess.run(
-                [".venv/bin/python", "-m", "unittest", "discover", "-s", "tests"],
+                cmd,
                 cwd=repo_path,
                 capture_output=True,
                 text=True,
-                timeout=30
+                timeout=45
             )
-            return res.returncode == 0, res.stdout + "\n" + res.stderr
+            return True, res.returncode == 0, res.stdout + "\n" + res.stderr
+        except subprocess.TimeoutExpired as te:
+            return True, False, f"Test suite timed out after 45 seconds.\nOutput so far:\n{te.stdout or ''}\n{te.stderr or ''}"
         except Exception as e:
-            return False, f"Failed to run test suite: {e}"
+            return False, False, f"Error executing test runner '{cmd}': {e}"
 
     # Extract JSON block
     def extract_json(text: str) -> dict:
@@ -251,10 +290,18 @@ def run_comparative_benchmark(repo_path: str, task_description: str, model_name:
 
     # Extract markdown code blocks
     def extract_code(text: str) -> str:
-        if "```python" in text:
-            return text.split("```python")[1].split("```")[0].strip()
-        elif "```" in text:
-            return text.split("```")[1].split("```")[0].strip()
+        import re
+        match = re.search(r'```[a-zA-Z0-9_-]*\n(.*?)\n```', text, re.DOTALL)
+        if match:
+            return match.group(1).strip()
+        if "```" in text:
+            parts = text.split("```")
+            if len(parts) >= 3:
+                content = parts[1].strip()
+                lines = content.splitlines()
+                if lines and re.match(r'^[a-zA-Z0-9_-]+$', lines[0]):
+                    return "\n".join(lines[1:]).strip()
+                return content
         return text.strip()
 
     # Determine if we are running in simulation
@@ -272,11 +319,13 @@ def run_comparative_benchmark(repo_path: str, task_description: str, model_name:
         log_progress("[*] Mode: LIVE API RUN\n")
 
     # Backup the codebase files to restore afterwards
+    supported_exts = (".py", ".rs", ".go", ".js", ".ts", ".java", ".cpp", ".c", ".h", ".hpp", ".php", ".rb")
     backup_files = {}
     for root, dirs, files in os.walk(repo_path):
         dirs[:] = [d for d in dirs if not d.startswith(".")]
         for file in files:
-            if file.endswith(".py") and not file.startswith("test_") and "_test.py" not in file:
+            ext = os.path.splitext(file)[1].lower()
+            if ext in supported_exts and not semantic_graph.is_test_file(os.path.join(root, file)):
                 full_p = os.path.join(root, file)
                 try:
                     with open(full_p, "rb") as f:
@@ -289,6 +338,7 @@ def run_comparative_benchmark(repo_path: str, task_description: str, model_name:
     recon_in_tokens = 0
     recon_out_tokens = 0
     recon_success = False
+    recon_runnable = True
     recon_log = ""
     recon_mutated_entity = "N/A"
     recon_file = "N/A"
@@ -310,7 +360,7 @@ def run_comparative_benchmark(repo_path: str, task_description: str, model_name:
             # Step B: Identify the target node to mutate
             log_progress("    [+] Step B: Calling LLM to identify mutation target file & entity FQN...")
             messages = [
-                {"role": "system", "content": "You are a software engineering agent acting on a codebase. Based on the repo blueprint, identify which single Python file path and method/function FQN (e.g. 'Calculator.add' or 'my_standalone_func') should be modified. Task: " + task_description},
+                {"role": "system", "content": "You are a software engineering agent acting on a codebase. Based on the repo blueprint, identify which single file path and method/function FQN should be modified. Task: " + task_description},
                 {"role": "user", "content": f"Repository Blueprint:\n{blueprint}\n\nSpecify the target in JSON. Return ONLY: {{\"file_path\": \"relative/path/to/file.py\", \"target_entity\": \"ClassName.method_name\"}}"}
             ]
             response, in_t, out_t = call_llm(messages)
@@ -329,9 +379,10 @@ def run_comparative_benchmark(repo_path: str, task_description: str, model_name:
             abs_file_path = os.path.join(repo_path, rel_file_path)
             body = hydrate_body(abs_file_path, target_entity)
             
+            ext = os.path.splitext(rel_file_path)[1].lower()[1:] or "code"
             messages = [
                 {"role": "system", "content": f"You are modifying the body of '{target_entity}'. Code task: {task_description}"},
-                {"role": "user", "content": f"Current implementation body of {target_entity}:\n```python\n{body}\n```\n\nReturn ONLY the new replacement code block for the body of this function. Do not write the function header/def statement."}
+                {"role": "user", "content": f"Current implementation body of {target_entity}:\n```{ext}\n{body}\n```\n\nReturn ONLY the new replacement code block for the body of this function. Do not write the function header/def statement."}
             ]
             response, in_t, out_t = call_llm(messages)
             recon_in_tokens += in_t
@@ -343,9 +394,9 @@ def run_comparative_benchmark(repo_path: str, task_description: str, model_name:
             
             if "successful" in mutation_res.lower():
                 log_progress("    [+] Step E: Running repository tests for With-Recon code...")
-                recon_success, test_log = run_repo_tests()
+                recon_runnable, recon_success, test_log = run_repo_tests()
                 recon_log = test_log
-                log_progress(f"        -> Test suite run completed (Result: {'Passed' if recon_success else 'Failed'})")
+                log_progress(f"        -> Test suite run completed (Result: {'Passed' if recon_success else ('Unrunnable' if not recon_runnable else 'Failed')})")
             else:
                 recon_success = False
                 recon_log = f"AST Mutation Failed: {mutation_res}"
@@ -366,6 +417,7 @@ def run_comparative_benchmark(repo_path: str, task_description: str, model_name:
     baseline_in_tokens = 0
     baseline_out_tokens = 0
     baseline_success = False
+    baseline_runnable = True
     baseline_log = ""
     baseline_file = "N/A"
 
@@ -383,13 +435,14 @@ def run_comparative_benchmark(repo_path: str, task_description: str, model_name:
             full_context = ""
             for p, content in backup_files.items():
                 rel_p = os.path.relpath(p, repo_path)
-                full_context += f"### File: {rel_p}\n```python\n{content.decode('utf8', errors='ignore')}\n```\n\n"
+                ext = os.path.splitext(p)[1][1:] or "code"
+                full_context += f"### File: {rel_p}\n```{ext}\n{content.decode('utf8', errors='ignore')}\n```\n\n"
             
             # Step A: Request modification of full file
             log_progress("    [+] Step B: Calling LLM to modify target source file within full context...")
             messages = [
                 {"role": "system", "content": "You are a software engineering agent acting on a codebase. You must modify the code to satisfy the task. Task: " + task_description},
-                {"role": "user", "content": f"Here is the full repository code:\n{full_context}\n\nImplement the changes. Specify which relative file path you modified, and return the ENTIRE updated content of that file inside a python code block."}
+                {"role": "user", "content": f"Here is the full repository code:\n{full_context}\n\nImplement the changes. Specify which relative file path you modified, and return the ENTIRE updated content of that file inside a markdown code block (e.g. ```rust, ```go, ```python, etc.)."}
             ]
             response, in_t, out_t = call_llm(messages)
             baseline_in_tokens += in_t
@@ -420,10 +473,15 @@ def run_comparative_benchmark(repo_path: str, task_description: str, model_name:
                 
             # Compile check and test execution
             log_progress("    [+] Step D: Compiling changes and running repository test suite...")
-            compile(new_file_content, abs_target_path, "exec")
-            baseline_success, test_log = run_repo_tests()
+            if target_rel_path.endswith(".py"):
+                try:
+                    compile(new_file_content, abs_target_path, "exec")
+                except Exception as compile_err:
+                    log_progress(f"        -> Python syntax compile check failed: {compile_err}")
+            
+            baseline_runnable, baseline_success, test_log = run_repo_tests()
             baseline_log = test_log
-            log_progress(f"        -> Test suite run completed (Result: {'Passed' if baseline_success else 'Failed'})")
+            log_progress(f"        -> Test suite run completed (Result: {'Passed' if baseline_success else ('Unrunnable' if not baseline_runnable else 'Failed')})")
         except Exception as ex:
             baseline_success = False
             baseline_log = f"Baseline comparative loop failed: {ex}"
@@ -458,7 +516,7 @@ def run_comparative_benchmark(repo_path: str, task_description: str, model_name:
     report.append(f"| Input Tokens | {recon_in_tokens:,} | {baseline_in_tokens:,} | **{in_savings} savings** |")
     report.append(f"| Output Tokens | {recon_out_tokens:,} | {baseline_out_tokens:,} | **{out_savings} savings** |")
     report.append(f"| Total Tokens | {total_recon:,} | {total_baseline:,} | **{total_savings} savings** |")
-    report.append(f"| Test Compilation & Run | {'✅ Passed' if recon_success else '❌ Failed'} | {'✅ Passed' if baseline_success else '❌ Failed'} | - |")
+    report.append(f"| Test Compilation & Run | {'✅ Passed' if recon_success else ('⚠️ Unrunnable' if not recon_runnable else '❌ Failed')} | {'✅ Passed' if baseline_success else ('⚠️ Unrunnable' if not baseline_runnable else '❌ Failed')} | - |")
     report.append(f"| Mutated Entity | `{recon_mutated_entity}` in `{recon_file}` | `{baseline_file}` (full file overwrite) | - |")
     report.append("")
     
@@ -637,6 +695,7 @@ def run_claw_lite_benchmark(workspace_dir: str, limit: int = 80, model_name: str
                 recon_in, recon_out = 0, 0
                 base_in, base_out = 0, 0
                 recon_pass, base_pass = False, False
+                recon_runnable, base_runnable = True, True
                 
                 # Parse metrics from returned markdown report
                 for line in report.splitlines():
@@ -650,11 +709,12 @@ def run_claw_lite_benchmark(workspace_dir: str, limit: int = 80, model_name: str
                         base_out = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
                     elif "Test Compilation" in line:
                         cells = line.split("|")
-                        # cells[0] = empty, cells[1] = label, cells[2] = recon, cells[3] = baseline
                         recon_cell = cells[2].strip() if len(cells) > 2 else ""
                         base_cell = cells[3].strip() if len(cells) > 3 else ""
                         recon_pass = "Passed" in recon_cell or "\u2705" in recon_cell
                         base_pass = "Passed" in base_cell or "\u2705" in base_cell
+                        recon_runnable = "Unrunnable" not in recon_cell
+                        base_runnable = "Unrunnable" not in base_cell
                 
                 results.append({
                     "instance_id": instance_id,
@@ -665,6 +725,7 @@ def run_claw_lite_benchmark(workspace_dir: str, limit: int = 80, model_name: str
                     "base_out": base_out,
                     "recon_pass": recon_pass,
                     "base_pass": base_pass,
+                    "runnable": recon_runnable and base_runnable,
                     "error": None
                 })
                 log_progress(f"    [+] Successfully benchmarked task {instance_id}")
@@ -704,18 +765,20 @@ def run_claw_lite_benchmark(workspace_dir: str, limit: int = 80, model_name: str
     in_savings = f"{(1 - avg_recon_in / max(1, avg_base_in)) * 100:.1f}%" if avg_base_in else "0.0%"
     out_savings = f"{(1 - avg_recon_out / max(1, avg_base_out)) * 100:.1f}%" if avg_base_out else "0.0%"
     total_savings = f"{(1 - avg_recon_total / max(1, avg_base_total)) * 100:.1f}%" if avg_base_total else "0.0%"
-
-    # Validate result consistency (pass/fail equivalence)
     consistent_count = 0
+    runnable_count = 0
     discrepancy_details = []
     
     for r in successful_runs:
+        if not r.get("runnable", True):
+            continue
+        runnable_count += 1
         if r["recon_pass"] == r["base_pass"]:
             consistent_count += 1
         else:
             discrepancy_details.append(f"- `{r['instance_id']}`: Recon pass={r['recon_pass']} | Baseline pass={r['base_pass']}")
-
-    consistency_rate = (consistent_count / total_successful) * 100
+ 
+    consistency_rate = (consistent_count / max(1, runnable_count)) * 100
     
     summary = [
         "# Claw-SWE-Bench Lite-80 Benchmark Summary",
@@ -732,8 +795,12 @@ def run_claw_lite_benchmark(workspace_dir: str, limit: int = 80, model_name: str
         "",
         "## Results Functional Consistency Validation",
         "",
-        f"**Test Result Consistency**: `{consistency_rate:.1f}%` ({consistent_count} of {total_successful} tasks achieved the same test pass/fail outcome)"
+        f"**Test Result Consistency**: `{consistency_rate:.1f}%` ({consistent_count} of {runnable_count} runnable tasks achieved the same test pass/fail outcome)"
     ]
+
+    if total_successful > runnable_count:
+        summary.append(f"- ⚠️ **Unrunnable Tasks Excluded**: {total_successful - runnable_count} tasks were excluded from consistency checks because their test suites could not be run (missing language tools or config).")
+        summary.append("")
 
     if consistency_rate == 100.0:
         summary.append("- ✅ **Results Validated**: Recon and the baseline achieved identical test execution results in all benchmark instances, confirming 100% functional parity.")

@@ -105,40 +105,45 @@ class SemanticGraph:
         parts = file_path.split(os.sep)
         if "dummy_repo" in parts:
             return False
-        if "tests" in parts or "test" in parts:
+        if any(p in ("tests", "test", "testing", "spec") for p in parts):
             return True
-        filename = parts[-1]
-        if filename.startswith("test_") or filename.endswith("_test.py"):
+        filename = parts[-1].lower()
+        if (filename.startswith("test_") or 
+            filename.endswith("_test.py") or 
+            filename.endswith("_test.go") or 
+            filename.endswith(".test.js") or 
+            filename.endswith(".test.ts") or 
+            filename.endswith("spec.rb")):
             return True
         return False
 
     def get_module_fqn(self, repo_path: str, file_path: str) -> str:
-        """Converts a file path relative to repo_path into a python module dot-path."""
+        """Converts a file path relative to repo_path into a dot-path module name."""
         rel_path = os.path.relpath(file_path, repo_path)
-        if rel_path.endswith(".py"):
-            rel_path = rel_path[:-3]
-        parts = rel_path.split(os.sep)
+        root, ext = os.path.splitext(rel_path)
+        parts = root.split(os.sep)
         if parts and parts[-1] == "__init__":
             parts = parts[:-1]
         return ".".join(parts)
 
     def index_repository(self, repo_path: str):
-        """Indexes all Python files in the repository (excluding tests)."""
+        """Indexes all supported source files in the repository (excluding tests)."""
         self.clear()
-        python_files = []
+        supported_files = []
+        supported_exts = (".py", ".rs", ".go", ".js", ".ts", ".java", ".cpp", ".c", ".h", ".hpp", ".php", ".rb")
         for root, dirs, files in os.walk(repo_path):
-            # Skip hidden directories like .venv, .git, etc.
             dirs[:] = [d for d in dirs if not d.startswith(".")]
             for file in files:
-                if file.endswith(".py"):
+                ext = os.path.splitext(file)[1].lower()
+                if ext in supported_exts:
                     full_path = os.path.join(root, file)
                     if not self.is_test_file(full_path):
-                        python_files.append(full_path)
+                        supported_files.append(full_path)
 
         parser = get_parser()
         
         # Phase 1: Register files, symbols, and imports
-        for file_path in python_files:
+        for file_path in supported_files:
             self.register_file(file_path)
             module_fqn = self.get_module_fqn(repo_path, file_path)
             
@@ -148,11 +153,15 @@ class SemanticGraph:
             except Exception:
                 continue
 
-            tree = parser.parse(content)
-            self._extract_symbols_and_imports(tree.root_node, file_path, module_fqn, content)
+            ext = os.path.splitext(file_path)[1].lower()
+            if ext == ".py":
+                tree = parser.parse(content)
+                self._extract_symbols_and_imports(tree.root_node, file_path, module_fqn, content)
+            else:
+                self._extract_non_python_symbols(file_path, module_fqn, content)
 
         # Phase 2: Resolve function calls and record references
-        for file_path in python_files:
+        for file_path in supported_files:
             module_fqn = self.get_module_fqn(repo_path, file_path)
             try:
                 with open(file_path, "rb") as f:
@@ -160,8 +169,180 @@ class SemanticGraph:
             except Exception:
                 continue
 
-            tree = parser.parse(content)
-            self._resolve_calls_and_references(tree.root_node, file_path, module_fqn, content)
+            ext = os.path.splitext(file_path)[1].lower()
+            if ext == ".py":
+                tree = parser.parse(content)
+                self._resolve_calls_and_references(tree.root_node, file_path, module_fqn, content)
+            else:
+                self._resolve_non_python_calls_and_references(file_path, module_fqn, content)
+
+    def _extract_non_python_symbols(self, file_path: str, module_fqn: str, content: bytes):
+        import re
+        from recon.parser import find_brace_blocks
+        
+        ext = os.path.splitext(file_path)[1].lower()
+        
+        if ext == ".rb":
+            lines = content.split(b"\n")
+            scope_stack = [module_fqn]
+            
+            re_class = re.compile(r'^\s*(class|module)\s+([A-Za-z0-9_::]+)')
+            re_def = re.compile(r'^\s*def\s+([A-Za-z0-9_?!.]+)')
+            re_end = re.compile(r'^\s*end\b')
+            re_start = re.compile(r'^\s*(class|module|def|begin|case)\b|(?:\bdo\b\s*(?:\|[^|]*\|)?\s*)$|^\s*(if|unless|while|until)\b')
+            
+            stack = []
+            
+            for line_idx, line in enumerate(lines):
+                line_num = line_idx + 1
+                line_str = line.decode('utf-8', errors='ignore')
+                
+                class_match = re_class.match(line_str)
+                if class_match:
+                    name = class_match.group(2)
+                    fqn = f"{scope_stack[-1]}.{name}"
+                    self.register_symbol(fqn, name, "class", file_path, line_num, line_num)
+                    scope_stack.append(fqn)
+                    stack.append(('class', line_num, name, 1))
+                    continue
+                    
+                def_match = re_def.match(line_str)
+                if def_match:
+                    name = def_match.group(1)
+                    fqn = f"{scope_stack[-1]}.{name}"
+                    symbol_type = "method" if len(scope_stack) > 1 else "function"
+                    self.register_symbol(fqn, name, symbol_type, file_path, line_num, line_num)
+                    stack.append(('def', line_num, name, 1))
+                    continue
+                    
+                if stack:
+                    if re_start.search(line_str):
+                        t, sl, n, depth = stack[-1]
+                        stack[-1] = (t, sl, n, depth + 1)
+                    elif re_end.search(line_str):
+                        t, sl, n, depth = stack[-1]
+                        if depth == 1:
+                            stack.pop()
+                            if t == 'class':
+                                scope_stack.pop()
+                            cursor = self.conn.cursor()
+                            cursor.execute("UPDATE symbols SET end_line = ? WHERE fqn = ?", (line_num, fqn))
+                            self.conn.commit()
+                        else:
+                            stack[-1] = (t, sl, n, depth - 1)
+            return
+
+        blocks = find_brace_blocks(content)
+        
+        def get_line_num(offset):
+            return content[:offset].count(b"\n") + 1
+            
+        containers = []
+        functions = []
+        for start, end, b_type in blocks:
+            if b_type == 'container':
+                containers.append((start, end))
+            else:
+                functions.append((start, end))
+                
+        for start, end in containers:
+            prev_end = 0
+            for s, e, _ in blocks:
+                if e < start and e > prev_end:
+                    prev_end = e
+            prefix = content[prev_end:start].decode('utf-8', errors='ignore').strip()
+            
+            name = "UnknownContainer"
+            match = re.search(r'\b(?:class|struct|impl|interface|trait|enum)\s+([A-Za-z0-9_:]+)', prefix)
+            if match:
+                name = match.group(1)
+            else:
+                cleaned = re.sub(r'[:<({].*$', '', prefix).strip()
+                words = cleaned.split()
+                if words:
+                    name = words[-1]
+                    
+            fqn = f"{module_fqn}.{name}"
+            start_line = get_line_num(start)
+            end_line = get_line_num(end)
+            self.register_symbol(fqn, name, "class", file_path, start_line, end_line)
+            
+        for start, end in functions:
+            prev_end = 0
+            for s, e, _ in blocks:
+                if e < start and e > prev_end:
+                    prev_end = e
+            prefix = content[prev_end:start].decode('utf-8', errors='ignore').strip()
+            
+            name = "unknown_func"
+            # Go: func (receiver Type) MethodName(...) – strip receiver before matching
+            match = re.search(r'\bfunc\s+\([^)]*\)\s+([A-Za-z0-9_]+)\s*\(', prefix)
+            if match:
+                name = match.group(1)
+            else:
+                # Rust/general: fn/func/function Name
+                match = re.search(r'\b(?:fn|func|function)\s+([A-Za-z0-9_]+)', prefix)
+                if match:
+                    name = match.group(1)
+                else:
+                    # Java/C++ style: ReturnType MethodName(
+                    match = re.search(r'\b([A-Za-z0-9_]+)\s*\([^)]*\)\s*(?:const\s*)?(?:\{|$)', prefix)
+                    if match:
+                        name = match.group(1)
+                    else:
+                        match = re.search(r'\b([A-Za-z0-9_]+)\s*\(', prefix)
+                        if match:
+                            name = match.group(1)
+            
+            parent_container_fqn = module_fqn
+            for c_start, c_end in containers:
+                if c_start < start and c_end > end:
+                    cursor = self.conn.cursor()
+                    cursor.execute("SELECT fqn FROM symbols WHERE file_path = ? AND type = 'class' AND start_line <= ? AND end_line >= ?",
+                                   (file_path, get_line_num(c_start), get_line_num(c_end)))
+                    row = cursor.fetchone()
+                    if row:
+                        parent_container_fqn = row[0]
+                        break
+            
+            fqn = f"{parent_container_fqn}.{name}"
+            symbol_type = "method" if parent_container_fqn != module_fqn else "function"
+            start_line = get_line_num(start)
+            end_line = get_line_num(end)
+            self.register_symbol(fqn, name, symbol_type, file_path, start_line, end_line)
+
+    def _resolve_non_python_calls_and_references(self, file_path: str, module_fqn: str, content: bytes):
+        import re
+        lines = content.split(b"\n")
+        
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT fqn, start_line, end_line FROM symbols WHERE file_path = ? AND type IN ('function', 'method')", (file_path,))
+        file_funcs = cursor.fetchall()
+        
+        cursor.execute("SELECT name, fqn FROM symbols")
+        workspace_symbols = cursor.fetchall()
+        symbol_map = {}
+        for name, fqn in workspace_symbols:
+            symbol_map.setdefault(name, []).append(fqn)
+            
+        for line_idx, line in enumerate(lines):
+            line_num = line_idx + 1
+            line_str = line.decode('utf-8', errors='ignore')
+            
+            caller_fqn = module_fqn
+            for fqn, start_l, end_l in file_funcs:
+                if start_l <= line_num <= end_l:
+                    caller_fqn = fqn
+                    break
+            
+            words = re.findall(r'\b([A-Za-z0-9_]+)\b', line_str)
+            for word in words:
+                if word in symbol_map:
+                    self.register_reference(word, file_path, line_num, line_str.strip())
+                    
+                    if re.search(r'\b' + re.escape(word) + r'\s*\(', line_str):
+                        for callee_fqn in symbol_map[word]:
+                            self.register_call(caller_fqn, callee_fqn, file_path, line_num)
 
     def _extract_symbols_and_imports(self, root_node: tree_sitter.Node, file_path: str, module_fqn: str, content: bytes):
         """Traverses the AST to find classes, functions, and imports."""
