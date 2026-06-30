@@ -33,6 +33,7 @@ A safe, structure-aware mutation engine to apply edits directly to AST nodes.
 
 1. **Token-Accounting Middleware**: Logs the input/output tokens of all data being transmitted to `.mcp_token_metrics.json`. Token counts are computed using an offline-friendly, code-optimized length divisor mapping directly to standard LLM tokenizers.
 2. **Auto-Reindexing**: Applying successful mutations to any AST node automatically triggers code re-indexing to ensure dependencies, Flow-DAG edges, and references are always up-to-date.
+3. **Model-Agnostic Design**: Recon communicates purely via human-readable Markdown blueprints and plaintext code blocks. It does not store model-specific tokens or embeddings in its semantic database. This ensures that any LLM agent client (Claude, Gemini, GPT, DeepSeek, Llama) can connect, navigate, and edit code bases without needing any model-specific adapters.
 
 ---
 
@@ -161,3 +162,10 @@ To run in development mode with the FastMCP inspector UI:
 ```bash
 npx -y @modelcontextprotocol/inspector uv run python src/recon/server.py
 ```
+
+---
+
+## Future Roadmap & TODOs
+
+*   **Saved Tokens Querying Module**: Implement an MCP tool/module to query and report token savings metrics per client, per project, or per task (filterable by parameters like datetime ranges). This will allow users to monitor real-time cost savings and efficiency metrics across different developer workspaces.
+
