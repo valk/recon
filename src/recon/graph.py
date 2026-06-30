@@ -3,6 +3,18 @@ import sqlite3
 import tree_sitter
 from recon.parser import get_parser
 
+# Maximum number of source files to index in a single repository.
+# Very large repos (e.g. Apache Druid with 8 000+ Java files) exhaust available
+# RAM during the two-phase walk.  We cap indexing to the first N files so that
+# the blueprint and call-graph are still useful while the process stays alive.
+MAX_FILES_TO_INDEX = 5000
+
+# When a symbol name has more than this many distinct definitions it is almost
+# certainly a generic word ("get", "set", "run", "close" …).  Recording every
+# reference to such names bloats the references_table and the call graph without
+# adding diagnostic value.  We skip them entirely.
+MAX_SYMBOL_DEFINITIONS = 5
+
 class SemanticGraph:
     def __init__(self):
         self.conn = sqlite3.connect(":memory:", check_same_thread=False)
@@ -139,14 +151,18 @@ class SemanticGraph:
                     full_path = os.path.join(root, file)
                     if not self.is_test_file(full_path):
                         supported_files.append(full_path)
+                        if len(supported_files) >= MAX_FILES_TO_INDEX:
+                            break
+            if len(supported_files) >= MAX_FILES_TO_INDEX:
+                break
 
         parser = get_parser()
-        
+
         # Phase 1: Register files, symbols, and imports
         for file_path in supported_files:
             self.register_file(file_path)
             module_fqn = self.get_module_fqn(repo_path, file_path)
-            
+
             try:
                 with open(file_path, "rb") as f:
                     content = f.read()
@@ -160,6 +176,20 @@ class SemanticGraph:
             else:
                 self._extract_non_python_symbols(file_path, module_fqn, content)
 
+        # Build shared caches once after Phase 1 to avoid per-file DB round-trips.
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT name, fqn FROM symbols")
+        rows = cursor.fetchall()
+        # symbol_map: name -> list of fqns
+        symbol_map: dict[str, list[str]] = {}
+        for name, fqn in rows:
+            symbol_map.setdefault(name, []).append(fqn)
+        # Names that appear in <= MAX_SYMBOL_DEFINITIONS places are non-generic.
+        workspace_symbol_names: set[str] = {
+            name for name, fqns in symbol_map.items()
+            if len(fqns) <= MAX_SYMBOL_DEFINITIONS
+        }
+
         # Phase 2: Resolve function calls and record references
         for file_path in supported_files:
             module_fqn = self.get_module_fqn(repo_path, file_path)
@@ -172,9 +202,15 @@ class SemanticGraph:
             ext = os.path.splitext(file_path)[1].lower()
             if ext == ".py":
                 tree = parser.parse(content)
-                self._resolve_calls_and_references(tree.root_node, file_path, module_fqn, content)
+                self._resolve_calls_and_references(
+                    tree.root_node, file_path, module_fqn, content,
+                    workspace_symbol_names, symbol_map
+                )
             else:
-                self._resolve_non_python_calls_and_references(file_path, module_fqn, content)
+                self._resolve_non_python_calls_and_references(
+                    file_path, module_fqn, content,
+                    workspace_symbol_names, symbol_map
+                )
 
     def _extract_non_python_symbols(self, file_path: str, module_fqn: str, content: bytes):
         import re
@@ -311,38 +347,49 @@ class SemanticGraph:
             end_line = get_line_num(end)
             self.register_symbol(fqn, name, symbol_type, file_path, start_line, end_line)
 
-    def _resolve_non_python_calls_and_references(self, file_path: str, module_fqn: str, content: bytes):
+    def _resolve_non_python_calls_and_references(
+        self, file_path: str, module_fqn: str, content: bytes,
+        workspace_symbol_names: set[str], symbol_map: dict[str, list[str]]
+    ):
         import re
         lines = content.split(b"\n")
-        
+
         cursor = self.conn.cursor()
-        cursor.execute("SELECT fqn, start_line, end_line FROM symbols WHERE file_path = ? AND type IN ('function', 'method')", (file_path,))
+        cursor.execute(
+            "SELECT fqn, start_line, end_line FROM symbols "
+            "WHERE file_path = ? AND type IN ('function', 'method')",
+            (file_path,)
+        )
         file_funcs = cursor.fetchall()
-        
-        cursor.execute("SELECT name, fqn FROM symbols")
-        workspace_symbols = cursor.fetchall()
-        symbol_map = {}
-        for name, fqn in workspace_symbols:
-            symbol_map.setdefault(name, []).append(fqn)
-            
+
+        # Build a per-file module FQN prefix so we can prefer local symbols.
         for line_idx, line in enumerate(lines):
             line_num = line_idx + 1
             line_str = line.decode('utf-8', errors='ignore')
-            
+
             caller_fqn = module_fqn
             for fqn, start_l, end_l in file_funcs:
                 if start_l <= line_num <= end_l:
                     caller_fqn = fqn
                     break
-            
+
             words = re.findall(r'\b([A-Za-z0-9_]+)\b', line_str)
             for word in words:
-                if word in symbol_map:
-                    self.register_reference(word, file_path, line_num, line_str.strip())
-                    
-                    if re.search(r'\b' + re.escape(word) + r'\s*\(', line_str):
-                        for callee_fqn in symbol_map[word]:
-                            self.register_call(caller_fqn, callee_fqn, file_path, line_num)
+                # Only track non-generic workspace symbols.
+                if word not in workspace_symbol_names:
+                    continue
+
+                self.register_reference(word, file_path, line_num, line_str.strip())
+
+                if re.search(r'\b' + re.escape(word) + r'\s*\(', line_str):
+                    candidates = symbol_map.get(word, [])
+                    # Prefer a local symbol (same module prefix) to avoid
+                    # registering calls to every same-named symbol in the repo.
+                    local_fqn = f"{module_fqn}.{word}"
+                    if local_fqn in candidates:
+                        self.register_call(caller_fqn, local_fqn, file_path, line_num)
+                    elif len(candidates) == 1:
+                        self.register_call(caller_fqn, candidates[0], file_path, line_num)
 
     def _extract_symbols_and_imports(self, root_node: tree_sitter.Node, file_path: str, module_fqn: str, content: bytes):
         """Traverses the AST to find classes, functions, and imports."""
@@ -450,19 +497,18 @@ class SemanticGraph:
             name = node.text.decode('utf8')
             self.register_import(file_path, name, f"{module_name}.{name}")
 
-    def _resolve_calls_and_references(self, root_node: tree_sitter.Node, file_path: str, module_fqn: str, content: bytes):
+    def _resolve_calls_and_references(
+        self, root_node: tree_sitter.Node, file_path: str, module_fqn: str, content: bytes,
+        workspace_symbol_names: set[str], symbol_map: dict[str, list[str]]
+    ):
         """Analyzes function calls and registers identifier references."""
         lines = [line.decode('utf8', errors='ignore') for line in content.split(b"\n")]
         scope_stack = [module_fqn]
 
-        # Get local imports
+        # Get local imports (still per-file, small query)
         cursor = self.conn.cursor()
         cursor.execute("SELECT local_name, target_fqn FROM imports WHERE file_path = ?", (file_path,))
         imports = dict(cursor.fetchall())
-
-        # Get all workspace symbol names for reference matching
-        cursor.execute("SELECT name FROM symbols")
-        workspace_symbol_names = set(row[0] for row in cursor.fetchall())
 
         def traverse(node):
             # Track current scopes
@@ -494,7 +540,9 @@ class SemanticGraph:
             elif node.type == "call":
                 callable_node = node.child_by_field_name("function")
                 if callable_node:
-                    callee_fqn = self._resolve_callable(callable_node, file_path, imports, scope_stack)
+                    callee_fqn = self._resolve_callable(
+                        callable_node, file_path, imports, scope_stack, symbol_map
+                    )
                     if callee_fqn:
                         caller_fqn = scope_stack[-1]
                         # Only register call dependencies if caller is a function/method
@@ -503,7 +551,7 @@ class SemanticGraph:
                         if caller_row and caller_row[0] in ("function", "method"):
                             self.register_call(caller_fqn, callee_fqn, file_path, node.start_point[0] + 1)
 
-            # Match identifiers to trace all other references
+            # Match identifiers to trace all other references (skip generic/ambiguous names)
             elif node.type == "identifier":
                 name = node.text.decode('utf8')
                 if name in workspace_symbol_names:
@@ -513,7 +561,7 @@ class SemanticGraph:
                     if parent:
                         if parent.type in ("class_definition", "function_definition") and parent.child_by_field_name("name") == node:
                             is_definition = True
-                    
+
                     if not is_definition:
                         line_idx = node.start_point[0]
                         line_text = lines[line_idx] if line_idx < len(lines) else ""
@@ -524,28 +572,25 @@ class SemanticGraph:
 
         traverse(root_node)
 
-    def _resolve_callable(self, node: tree_sitter.Node, file_path: str, imports: dict, scope_stack: list[str]) -> str | None:
+    def _resolve_callable(
+        self, node: tree_sitter.Node, file_path: str, imports: dict,
+        scope_stack: list[str], symbol_map: dict[str, list[str]]
+    ) -> str | None:
         """Helper to resolve a callable AST node to its fully qualified name."""
         if node.type == "identifier":
             name = node.text.decode('utf8')
-            # Check imports
+            # Check imports first
             if name in imports:
                 return imports[name]
-            # Check if it is a local symbol in the current module
+            # Prefer a local symbol in the current module (no DB query needed)
             module_fqn = scope_stack[0]
             local_fqn = f"{module_fqn}.{name}"
-            cursor = self.conn.cursor()
-            cursor.execute("SELECT fqn FROM symbols WHERE fqn = ?", (local_fqn,))
-            row = cursor.fetchone()
-            if row:
-                return row[0]
-            
-            # Check if there is a unique global symbol with this name
-            cursor.execute("SELECT fqn FROM symbols WHERE name = ?", (name,))
-            rows = cursor.fetchall()
-            if len(rows) == 1:
-                return rows[0][0]
-                
+            candidates = symbol_map.get(name, [])
+            if local_fqn in candidates:
+                return local_fqn
+            # Accept a unique global symbol
+            if len(candidates) == 1:
+                return candidates[0]
             return None
 
         elif node.type == "attribute":
@@ -554,29 +599,29 @@ class SemanticGraph:
             attr_node = node.child_by_field_name("attribute")
             if obj_node and attr_node:
                 attr_name = attr_node.text.decode('utf8')
-                
-                # Case 1: self.method()
+
+                # Case 1: self.method() — find enclosing class FQN from scope stack
                 if obj_node.type == "identifier" and obj_node.text.decode('utf8') == "self":
-                    # Find enclosing class FQN
+                    cursor = self.conn.cursor()
                     for scope in reversed(scope_stack):
-                        cursor = self.conn.cursor()
                         cursor.execute("SELECT type FROM symbols WHERE fqn = ?", (scope,))
                         row = cursor.fetchone()
                         if row and row[0] == "class":
                             return f"{scope}.{attr_name}"
-                            
+
                 # Case 2: module.func() where module is imported
                 if obj_node.type == "identifier":
                     obj_name = obj_node.text.decode('utf8')
                     if obj_name in imports:
                         return f"{imports[obj_name]}.{attr_name}"
-                        
-                # Fallback: check if we can resolve by looking for a method name that matches
-                cursor = self.conn.cursor()
-                cursor.execute("SELECT fqn FROM symbols WHERE name = ? AND type = 'method'", (attr_name,))
-                rows = cursor.fetchall()
-                if len(rows) == 1:
-                    return rows[0][0]
+
+                # Fallback: unique method name in entire workspace (use cache)
+                method_candidates = [
+                    fqn for fqn in symbol_map.get(attr_name, [])
+                    if f".{attr_name}" in fqn
+                ]
+                if len(method_candidates) == 1:
+                    return method_candidates[0]
 
         return None
 

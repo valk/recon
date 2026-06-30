@@ -63,22 +63,49 @@ def generate_repo_blueprint(repo_path: str) -> str:
         "*(Implementation details elided to save context space)*",
         ""
     ]
-    
-    for file_path in files:
-        rel_path = os.path.relpath(file_path, repo_path)
-        try:
-            with open(file_path, "rb") as f:
-                content = f.read()
-            elided = elide_source(content).decode("utf8", errors="ignore")
-            
-            blueprint.append(f"### File: `{rel_path}`")
-            blueprint.append("```python")
-            blueprint.append(elided)
-            blueprint.append("```")
-            blueprint.append("")
-        except Exception as e:
-            blueprint.append(f"### File: `{rel_path}` - Error parsing: {e}")
-            blueprint.append("")
+
+    # For large repos the full-skeleton representation would exceed LLM context
+    # limits and cause HTTP 400 errors.  Switch to a compact symbol-list instead.
+    COMPACT_THRESHOLD = 50
+    use_compact = len(files) > COMPACT_THRESHOLD
+
+    if use_compact:
+        blueprint.append(
+            f"> **Compact mode** — {len(files)} files indexed "
+            f"(threshold: {COMPACT_THRESHOLD}). Showing symbol list only.\n"
+        )
+        cursor.execute(
+            "SELECT fqn, type, file_path, start_line FROM symbols "
+            "ORDER BY file_path ASC, start_line ASC"
+        )
+        for fqn, sym_type, sym_file, start_line in cursor.fetchall():
+            rel = os.path.relpath(sym_file, repo_path)
+            blueprint.append(f"- `{sym_type}` **{fqn}** — `{rel}` L{start_line}")
+        blueprint.append("")
+    else:
+        ext_to_lang = {
+            ".py": "python", ".rs": "rust", ".go": "go",
+            ".js": "javascript", ".ts": "typescript", ".java": "java",
+            ".cpp": "cpp", ".c": "c", ".h": "c", ".hpp": "cpp",
+            ".php": "php", ".rb": "ruby",
+        }
+        for file_path in files:
+            rel_path = os.path.relpath(file_path, repo_path)
+            ext = os.path.splitext(file_path)[1].lower()
+            lang = ext_to_lang.get(ext, "")
+            try:
+                with open(file_path, "rb") as f:
+                    content = f.read()
+                elided = elide_source(content, file_path).decode("utf8", errors="ignore")
+
+                blueprint.append(f"### File: `{rel_path}`")
+                blueprint.append(f"```{lang}")
+                blueprint.append(elided)
+                blueprint.append("```")
+                blueprint.append("")
+            except Exception as e:
+                blueprint.append(f"### File: `{rel_path}` - Error parsing: {e}")
+                blueprint.append("")
             
     blueprint.append("## Flow-DAG (Directed Call Graph)")
     blueprint.append("")
