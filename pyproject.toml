@@ -6,12 +6,13 @@ readme = "README.md"
 authors = [
     { name = "Val Kotlarov Hoffman", email = "val.hoffman@gmail.com" }
 ]
-requires-python = ">=3.14"
+requires-python = ">=3.13"
 dependencies = [
     "datasets>=5.0.0",
     "fastmcp",
     "tree-sitter",
     "tree-sitter-python",
+    "llmlingua",
 ]
 
 [build-system]

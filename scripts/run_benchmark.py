@@ -19,10 +19,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 
 def cmd_comparative(args):
     from recon.server import run_comparative_benchmark
+    ablations = [a.strip() for a in args.ablation.split(",") if a.strip()]
     report = run_comparative_benchmark(
         repo_path=os.path.abspath(args.repo_path),
         task_description=args.task_description,
-        model_name=args.model
+        model_name=args.model,
+        ablations=ablations,
+        force_simulation=args.simulation
     )
     print("\n" + "=" * 60 + "\n")
     print(report)
@@ -30,12 +33,15 @@ def cmd_comparative(args):
 
 def cmd_lite80(args):
     from recon.server import run_claw_lite_benchmark
+    ablations = [a.strip() for a in args.ablation.split(",") if a.strip()]
     report = run_claw_lite_benchmark(
         workspace_dir=os.path.abspath(args.workspace_dir),
         limit=args.limit,
         shuffle=args.shuffle,
         model_name=args.model,
-        resume=args.resume
+        resume=args.resume,
+        ablations=ablations,
+        force_simulation=args.simulation
     )
     print("\n" + "=" * 60 + "\n")
     print(report)
@@ -71,7 +77,9 @@ def main():
     )
     p_comp.add_argument("repo_path", help="Path to the target repository")
     p_comp.add_argument("task_description", help="Task the LLM should perform (e.g. 'Add bounds checks to Calculator.subtract')")
-    p_comp.add_argument("--model", default="", help="LLM model name (e.g. deepseek/deepseek-chat). Falls back to RECON_MODEL env var.")
+    p_comp.add_argument("--model", "--models", default="", dest="model", help="LLM model name or comma-separated list (e.g. deepseek/deepseek-chat,gpt-4o). Falls back to RECON_MODEL env var.")
+    p_comp.add_argument("--ablation", "--ablations", default="", dest="ablation", help="Ablation components (comma-separated, e.g. no-orient,no-hydrate)")
+    p_comp.add_argument("--simulation", action="store_true", help="Force simulation mode even if API keys are set in the environment.")
 
     # --- lite-80 sub-command ---
     p_lite = subparsers.add_parser(
@@ -81,8 +89,10 @@ def main():
     p_lite.add_argument("workspace_dir", help="Directory to clone benchmark repos into")
     p_lite.add_argument("--limit", type=int, default=80, help="Number of instances to evaluate (default: 80)")
     p_lite.add_argument("--shuffle", action="store_true", help="Shuffle dataset items to run in random order")
-    p_lite.add_argument("--model", default="", help="LLM model name (e.g. deepseek/deepseek-chat). Falls back to RECON_MODEL env var.")
+    p_lite.add_argument("--model", "--models", default="", dest="model", help="LLM model name or comma-separated list (e.g. deepseek/deepseek-chat,gpt-4o). Falls back to RECON_MODEL env var.")
     p_lite.add_argument("--resume", action="store_true", help="Resume benchmark execution from checkpoint or latest log file.")
+    p_lite.add_argument("--ablation", "--ablations", default="", dest="ablation", help="Ablation components (comma-separated, e.g. no-orient,no-hydrate)")
+    p_lite.add_argument("--simulation", action="store_true", help="Force simulation mode even if API keys are set in the environment.")
 
     args = parser.parse_args()
 
