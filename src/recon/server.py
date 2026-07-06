@@ -242,14 +242,14 @@ def run_comparative_benchmark(repo_path: str, task_description: str, model_name:
         url = None
         headers = {}
 
-        # 1. If it's a GLM model and ZAI_API_KEY is set, route directly to Zhipu API
-        if model_to_use.startswith("glm-") and os.environ.get("ZAI_API_KEY"):
-            api_key = os.environ.get("ZAI_API_KEY")
-            url = "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions"
-            headers = {
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {api_key}"
-            }
+        # # 1. If it's a GLM model and ZAI_API_KEY is set, route directly to Zhipu API
+        # if model_to_use.startswith("glm-") and os.environ.get("ZAI_API_KEY"):
+        #     api_key = os.environ.get("ZAI_API_KEY")
+        #     url = "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions"
+        #     headers = {
+        #         "Content-Type": "application/json",
+        #         "Authorization": f"Bearer {api_key}"
+        #     }
 
         # 2. Otherwise check OpenRouter
         if not api_key:
@@ -280,14 +280,14 @@ def run_comparative_benchmark(repo_path: str, task_description: str, model_name:
                 "Authorization": f"Bearer {api_key}"
             }
 
-        # 5. Zhipu AI Fallback
-        if not api_key:
-            api_key = os.environ.get("ZAI_API_KEY")
-            url = "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions"
-            headers = {
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {api_key}"
-            }
+        # # 5. Zhipu AI Fallback
+        # if not api_key:
+        #     api_key = os.environ.get("ZAI_API_KEY")
+        #     url = "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions"
+        #     headers = {
+        #         "Content-Type": "application/json",
+        #         "Authorization": f"Bearer {api_key}"
+        #     }
 
         # Simulation mode if no keys are set
         if not api_key:
@@ -300,21 +300,53 @@ def run_comparative_benchmark(repo_path: str, task_description: str, model_name:
         }
         
         import httpx
-        try:
-            with httpx.Client(http2=False, timeout=90.0) as client:
-                response = client.post(url, json=payload, headers=headers)
-                response.raise_for_status()
-                res_data = response.json()
-            content = res_data["choices"][0]["message"]["content"]
-            usage = res_data.get("usage", {})
-            in_t = usage.get("prompt_tokens", len(json.dumps(messages)) // 4)
-            out_t = usage.get("completion_tokens", len(content) // 4)
-            return content, in_t, out_t
-        except Exception as e:
-            err_body = ""
-            if 'response' in locals() and hasattr(response, "text"):
-                err_body = f" - Response: {response.text}"
-            raise RuntimeError(f"LLM API Call failed: {e}{err_body}")
+        import time
+        max_retries = 6
+        backoff_factor = 2.0
+        
+        for attempt in range(max_retries):
+            try:
+                with httpx.Client(http2=False, timeout=90.0) as client:
+                    response = client.post(url, json=payload, headers=headers)
+                    
+                    # Handle rate limit (429 or Zhipu 1302 code)
+                    is_rate_limited = (response.status_code == 429) or \
+                                      (response.status_code == 400 and "1302" in response.text)
+                    
+                    if is_rate_limited:
+                        wait_time = (backoff_factor ** attempt) + 1.0
+                        log_progress(f"    [!] Rate limit hit (429/1302). Retrying in {wait_time:.1f}s (Attempt {attempt+1}/{max_retries})...")
+                        time.sleep(wait_time)
+                        continue
+                        
+                    response.raise_for_status()
+                    res_data = response.json()
+                    
+                content = res_data["choices"][0]["message"]["content"]
+                usage = res_data.get("usage", {})
+                in_t = usage.get("prompt_tokens", len(json.dumps(messages)) // 4)
+                out_t = usage.get("completion_tokens", len(content) // 4)
+                return content, in_t, out_t
+                
+            except Exception as e:
+                # If we have a response and it is rate limited, retry
+                is_rate_limited_err = False
+                if 'response' in locals():
+                    if (response.status_code == 429) or ("rate" in response.text.lower()) or ("1302" in response.text):
+                        is_rate_limited_err = True
+                        
+                if is_rate_limited_err and attempt < max_retries - 1:
+                    wait_time = (backoff_factor ** attempt) + 1.0
+                    log_progress(f"    [!] Rate limit exception. Retrying in {wait_time:.1f}s (Attempt {attempt+1}/{max_retries})...")
+                    time.sleep(wait_time)
+                    continue
+                    
+                if attempt == max_retries - 1:
+                    err_body = ""
+                    if 'response' in locals() and hasattr(response, "text"):
+                        err_body = f" - Response: {response.text}"
+                    raise RuntimeError(f"LLM API Call failed after {max_retries} attempts: {e}{err_body}")
+                raise e
 
     # 2. Helper for executing tests in the target repository
     def run_repo_tests() -> tuple[bool, bool, str]:
@@ -440,6 +472,14 @@ def run_comparative_benchmark(repo_path: str, task_description: str, model_name:
                         backup_files[full_p] = f.read()
                 except Exception:
                     pass
+
+    # Check total repository context size to prevent timeouts and API payload limit errors
+    total_size_bytes = sum(len(content) for content in backup_files.values())
+    estimated_tokens = total_size_bytes // 4
+    if not force_simulation and estimated_tokens > 400000:
+        log_progress(f"[!] Warning: Target repository is too large ({estimated_tokens:,} estimated tokens).")
+        log_progress("    -> Skipping task to prevent API write/read timeouts and model context window limitations.")
+        return "SKIPPED: Context exceeds max token threshold (400,000 tokens limit)"
 
     all_results = {}
 
@@ -1225,7 +1265,13 @@ def run_claw_lite_benchmark(workspace_dir: str, limit: int = 80, shuffle: bool =
             target_repo_dir = os.path.join(workspace_dir, f"instance_{instance_id}")
             
             # Clone and setup repository if needed
-            if not os.path.exists(target_repo_dir):
+            if not os.path.exists(target_repo_dir) or not os.path.exists(os.path.join(target_repo_dir, ".git")):
+                if os.path.exists(target_repo_dir):
+                    import shutil
+                    try:
+                        shutil.rmtree(target_repo_dir)
+                    except Exception:
+                        pass
                 os.makedirs(target_repo_dir, exist_ok=True)
                 repo_url = f"https://github.com/{repo_name}.git"
                 log_progress(f"    [+] Cloning {repo_url}...")
@@ -1261,6 +1307,23 @@ def run_claw_lite_benchmark(workspace_dir: str, limit: int = 80, shuffle: bool =
                         force_simulation=force_simulation
                     )
                     
+                    if report.startswith("SKIPPED") or report.startswith("Error"):
+                        log_progress(f"    [-] Task skipped or errored: {report}")
+                        results.append({
+                            "instance_id": instance_id,
+                            "model_name": model,
+                            "success": False,
+                            "recon_in": 0, "recon_out": 0,
+                            "base_in": 0, "base_out": 0,
+                            "llmlingua_in": 0, "llmlingua_out": 0,
+                            "recon_latency": 0.0, "base_latency": 0.0, "llmlingua_latency": 0.0,
+                            "recon_pass": False, "base_pass": False, "llmlingua_pass": False,
+                            "runnable": False,
+                            "error": report
+                        })
+                        save_checkpoint(results, resumed_from_log)
+                        continue
+
                     recon_in, recon_out = 0, 0
                     base_in, base_out = 0, 0
                     llmlingua_in, llmlingua_out = 0, 0
