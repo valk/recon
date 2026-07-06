@@ -238,15 +238,31 @@ def run_comparative_benchmark(repo_path: str, task_description: str, model_name:
     
     # 1. Helper for LLM Calling
     def call_llm(messages: list, model_to_use: str) -> tuple[str, int, int]:
-        api_key = os.environ.get("OPENROUTER_API_KEY")
-        url = "https://openrouter.ai/api/v1/chat/completions"
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}",
-            "HTTP-Referer": "https://github.com/google-deepmind/antigravity",
-            "X-Title": "Recon comparative benchmark"
-        }
-        
+        api_key = None
+        url = None
+        headers = {}
+
+        # 1. If it's a GLM model and ZAI_API_KEY is set, route directly to Zhipu API
+        if model_to_use.startswith("glm-") and os.environ.get("ZAI_API_KEY"):
+            api_key = os.environ.get("ZAI_API_KEY")
+            url = "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions"
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}"
+            }
+
+        # 2. Otherwise check OpenRouter
+        if not api_key:
+            api_key = os.environ.get("OPENROUTER_API_KEY")
+            url = "https://openrouter.ai/api/v1/chat/completions"
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}",
+                "HTTP-Referer": "https://github.com/google-deepmind/antigravity",
+                "X-Title": "Recon comparative benchmark"
+            }
+            
+        # 3. OpenAI
         if not api_key:
             api_key = os.environ.get("OPENAI_API_KEY")
             url = "https://api.openai.com/v1/chat/completions"
@@ -255,9 +271,19 @@ def run_comparative_benchmark(repo_path: str, task_description: str, model_name:
                 "Authorization": f"Bearer {api_key}"
             }
             
+        # 4. DeepSeek
         if not api_key:
             api_key = os.environ.get("DEEPSEEK_API_KEY")
             url = "https://api.deepseek.com/chat/completions"
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}"
+            }
+
+        # 5. Zhipu AI Fallback
+        if not api_key:
+            api_key = os.environ.get("ZAI_API_KEY")
+            url = "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions"
             headers = {
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {api_key}"
@@ -273,22 +299,21 @@ def run_comparative_benchmark(repo_path: str, task_description: str, model_name:
             "temperature": 0.0
         }
         
-        req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
+        import httpx
         try:
-            with urllib.request.urlopen(req, timeout=90) as response:
-                res_data = json.loads(response.read().decode("utf-8"))
-                content = res_data["choices"][0]["message"]["content"]
-                usage = res_data.get("usage", {})
-                in_t = usage.get("prompt_tokens", len(json.dumps(messages)) // 4)
-                out_t = usage.get("completion_tokens", len(content) // 4)
-                return content, in_t, out_t
+            with httpx.Client(http2=False, timeout=90.0) as client:
+                response = client.post(url, json=payload, headers=headers)
+                response.raise_for_status()
+                res_data = response.json()
+            content = res_data["choices"][0]["message"]["content"]
+            usage = res_data.get("usage", {})
+            in_t = usage.get("prompt_tokens", len(json.dumps(messages)) // 4)
+            out_t = usage.get("completion_tokens", len(content) // 4)
+            return content, in_t, out_t
         except Exception as e:
             err_body = ""
-            if hasattr(e, "read"):
-                try:
-                    err_body = f" - Response: {e.read().decode('utf-8')}"
-                except Exception:
-                    pass
+            if 'response' in locals() and hasattr(response, "text"):
+                err_body = f" - Response: {response.text}"
             raise RuntimeError(f"LLM API Call failed: {e}{err_body}")
 
     # 2. Helper for executing tests in the target repository
@@ -323,19 +348,23 @@ def run_comparative_benchmark(repo_path: str, task_description: str, model_name:
             else:
                 cmd = ["gradle", "test"]
         else:
-            venv_pytest = os.path.join(repo_path, ".venv/bin/pytest")
-            if os.path.exists(venv_pytest):
-                cmd = [venv_pytest]
-            else:
-                import shutil
-                if shutil.which("pytest"):
-                    cmd = ["pytest"]
+            try:
+                import pytest
+                cmd = [sys.executable, "-m", "pytest"]
+            except ImportError:
+                venv_pytest = os.path.join(repo_path, ".venv/bin/pytest")
+                if os.path.exists(venv_pytest):
+                    cmd = [venv_pytest]
                 else:
-                    venv_python = os.path.join(repo_path, ".venv/bin/python")
-                    if os.path.exists(venv_python):
-                        cmd = [venv_python, "-m", "unittest", "discover", "-s", "tests"]
+                    import shutil
+                    if shutil.which("pytest"):
+                        cmd = ["pytest"]
                     else:
-                        cmd = [sys.executable, "-m", "unittest", "discover", "-s", "tests"]
+                        venv_python = os.path.join(repo_path, ".venv/bin/python")
+                        if os.path.exists(venv_python):
+                            cmd = [venv_python, "-m", "unittest", "discover", "-s", "tests"]
+                        else:
+                            cmd = [sys.executable, "-m", "unittest", "discover", "-s", "tests"]
                         
         if not cmd:
             return False, False, "No recognized test runner found for this repository."
@@ -384,7 +413,7 @@ def run_comparative_benchmark(repo_path: str, task_description: str, model_name:
         return text.strip()
 
     # Determine if we are running in simulation
-    is_simulation = force_simulation or not (os.environ.get("OPENROUTER_API_KEY") or os.environ.get("OPENAI_API_KEY") or os.environ.get("DEEPSEEK_API_KEY"))
+    is_simulation = force_simulation or not (os.environ.get("OPENROUTER_API_KEY") or os.environ.get("OPENAI_API_KEY") or os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("ZAI_API_KEY"))
 
     def log_progress(msg: str):
         print(msg, file=sys.stderr, flush=True)
@@ -1036,7 +1065,7 @@ def run_claw_lite_benchmark(workspace_dir: str, limit: int = 80, shuffle: bool =
         ablations = []
         
     workspace_dir = os.path.abspath(workspace_dir)
-    is_simulation = force_simulation or not (os.environ.get("OPENROUTER_API_KEY") or os.environ.get("OPENAI_API_KEY") or os.environ.get("DEEPSEEK_API_KEY"))
+    is_simulation = force_simulation or not (os.environ.get("OPENROUTER_API_KEY") or os.environ.get("OPENAI_API_KEY") or os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("ZAI_API_KEY"))
 
     def log_progress(msg: str):
         print(msg, file=sys.stderr, flush=True)

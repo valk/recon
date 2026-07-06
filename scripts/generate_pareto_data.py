@@ -15,6 +15,9 @@ PRICING = {
     "deepseek/deepseek-chat": {"input": 0.14, "output": 0.28},
     "gpt-4o": {"input": 5.00, "output": 15.00},
     "claude-3-5-sonnet": {"input": 3.00, "output": 15.00},
+    "glm-5.2": {"input": 14.00, "output": 14.00},
+    "glm-5": {"input": 10.00, "output": 10.00},
+    "glm-4.7-flash": {"input": 0.01, "output": 0.01},
     "default": {"input": 1.00, "output": 3.00}
 }
 
