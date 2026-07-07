@@ -172,3 +172,12 @@ npx -y @modelcontextprotocol/inspector uv run python src/recon/server.py
 
 *   **Saved Tokens Querying Module**: Implement an MCP tool/module to query and report token savings metrics per client, per project, or per task (filterable by parameters like datetime ranges). This will allow users to monitor real-time cost savings and efficiency metrics across different developer workspaces.
 
+---
+
+## License
+
+This project is licensed under the MIT License. Anyone is free to use, modify, and distribute this software, including for commercial purposes.
+
+The only requirement is to attribute the author, **Val Kotlarov Hoffman**, and link to the original repository: [https://github.com/valk/recon/](https://github.com/valk/recon/). See the [LICENSE](LICENSE) file for details.
+
+

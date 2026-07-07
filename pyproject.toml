@@ -3,6 +3,7 @@ name = "recon"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
+license = {text = "MIT"}
 authors = [
     { name = "Val Kotlarov Hoffman", email = "val.hoffman@gmail.com" }
 ]
