@@ -82,7 +82,7 @@ Using our benchmark averages, the real-world cost savings scale dramatically whe
 
 ### Recon vs. Existing Open Source
 * **Aider (RepoMap)**: While Aider uses tree-sitter to build a structural repository map for orientation (similar to Recon's Tier 1), it still reads the *entire contents* of files when applying edits. Recon goes a step further: it never exposes implementation details of unmodified blocks to the LLM during mutation (Tier 3), surgically patching function bodies in isolation.
-* **Prompt Compressors (e.g., LLMLingua)**: General compressors strip words based on information entropy (perplexity). These are code-blind and frequently break syntax, remove whitespace, or corrupt Python's indentation structure. Recon uses AST-grounded pruning, guaranteeing 100% syntactical safety.
+* **Prompt Compressors (e.g., LLMLingua)**: General compressors strip words based on information entropy (perplexity). These are code-blind and frequently break syntax, remove whitespace, or corrupt Python's indentation structure. Recon uses AST-grounded pruning, guaranteeing 100% syntactical safety. Empirically, in tasks like `gin-gonic__gin-3820`, LLMLingua's code-blind compression broke the codebase's structural integrity, causing compile/runtime test failures, whereas Recon's structure-aware skeletons maintained 100% functional correctness and matched the Baseline (Result: Passed).
 
 ### Academic Research Underpinnings (arXiv)
 Recon's 3-tier architecture is heavily aligned with recent research in LLM context engineering:
