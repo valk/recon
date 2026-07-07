@@ -349,7 +349,7 @@ def run_comparative_benchmark(repo_path: str, task_description: str, model_name:
                 raise e
 
     # 2. Helper for executing tests in the target repository
-    def run_repo_tests() -> tuple[bool, bool, str]:
+    def run_repo_tests() -> tuple[bool, bool, str]:  # (runnable, success, log)
         files_in_root = os.listdir(repo_path)
         cmd = None
         
@@ -414,6 +414,9 @@ def run_comparative_benchmark(repo_path: str, task_description: str, model_name:
                 timeout=120,
                 start_new_session=True
             )
+            # pytest exit code 5 = "no tests collected" — treat as Unrunnable, not Failed
+            if res.returncode == 5:
+                return False, False, res.stdout + "\n" + res.stderr
             return True, res.returncode == 0, res.stdout + "\n" + res.stderr
         except subprocess.TimeoutExpired as te:
             return True, False, f"Test suite timed out after 120 seconds.\nOutput so far:\n{te.stdout or ''}\n{te.stderr or ''}"
