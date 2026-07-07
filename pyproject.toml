@@ -13,6 +13,7 @@ dependencies = [
     "tree-sitter",
     "tree-sitter-python",
     "llmlingua",
+    "pytest>=9.1.1",
 ]
 
 [build-system]
