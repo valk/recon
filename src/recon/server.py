@@ -139,12 +139,47 @@ def hydrate_node_body(file_path: str, target_entity: str) -> str:
     """
     Retrieves the full implementation body text of a single targeted AST node 
     (e.g., 'MyClass.process_payment' or 'my_standalone_function') inside file_path.
+
+    Cross-Reference Pre-Flight (auto-injected):
+    In addition to the implementation body, the response automatically includes
+    upstream callers (who calls this node) and downstream callees (what this node
+    calls), as well as all reference locations across the codebase. This eliminates
+    the need for the agent to make separate get_node_dependencies /
+    find_symbol_references calls before deciding how to mutate the node.
     """
     file_path = os.path.abspath(file_path)
     try:
-        return hydrate_body(file_path, target_entity)
+        body = hydrate_body(file_path, target_entity)
     except Exception as e:
         return f"Error: {str(e)}"
+
+    # --- Cross-Reference Pre-Flight ---
+    # Derive the bare function/method name from the entity qualifier
+    # e.g. 'MyClass.process_payment' -> 'process_payment'
+    #      'my_standalone_function'  -> 'my_standalone_function'
+    bare_name = target_entity.split(".")[-1] if "." in target_entity else target_entity
+
+    sections = [body, "", "---", "## Cross-Reference Pre-Flight", ""]
+
+    # 1. Upstream callers & downstream callees via the Flow-DAG
+    try:
+        deps = semantic_graph.get_node_dependencies(file_path, bare_name)
+        sections.append("### Call-Graph Dependencies")
+        sections.append(deps)
+        sections.append("")
+    except Exception:
+        pass
+
+    # 2. All reference locations across the codebase
+    try:
+        refs = semantic_graph.find_symbol_references(bare_name)
+        sections.append("### Symbol References")
+        sections.append(refs)
+        sections.append("")
+    except Exception:
+        pass
+
+    return "\n".join(sections)
 
 @mcp.tool()
 @log_token_metrics("mutate_node_body")
@@ -583,11 +618,27 @@ def run_comparative_benchmark(repo_path: str, task_description: str, model_name:
                 else:
                     log_progress(f"    [+] Step C: Hydrating target body and requesting AST node modification from LLM...")
                     body = hydrate_body(abs_file_path, target_entity)
-                    
+
+                    # Cross-Reference Pre-Flight: inject caller/callee deps and symbol
+                    # references into the LLM prompt so it has full context before mutating.
+                    bare_name = target_entity.split(".")[-1] if "." in target_entity else target_entity
+                    xref_parts = []
+                    try:
+                        deps_text = semantic_graph.get_node_dependencies(abs_file_path, bare_name)
+                        xref_parts.append("### Call-Graph Dependencies\n" + deps_text)
+                    except Exception:
+                        pass
+                    try:
+                        refs_text = semantic_graph.find_symbol_references(bare_name)
+                        xref_parts.append("### Symbol References\n" + refs_text)
+                    except Exception:
+                        pass
+                    xref_section = ("\n\n---\n## Cross-Reference Pre-Flight\n\n" + "\n\n".join(xref_parts)) if xref_parts else ""
+
                     ext = os.path.splitext(rel_file_path)[1].lower()[1:] or "code"
                     messages = [
                         {"role": "system", "content": f"You are modifying the body of '{target_entity}'. Code task: {task_description}"},
-                        {"role": "user", "content": f"Current implementation body of {target_entity}:\n```{ext}\n{body}\n```\n\nReturn ONLY the new replacement code block for the body of this function. Do not write the function header/def statement."}
+                        {"role": "user", "content": f"Current implementation body of {target_entity}:\n```{ext}\n{body}\n```{xref_section}\n\nReturn ONLY the new replacement code block for the body of this function. Do not write the function header/def statement."}
                     ]
                     st = time.time()
                     response, in_t, out_t = call_llm(messages, model)
